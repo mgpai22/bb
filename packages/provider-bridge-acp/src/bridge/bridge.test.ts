@@ -1578,13 +1578,15 @@ describe("acp bridge", () => {
       });
       return (await waitForResponse(id)).result as {
         commands: unknown;
+        advertised: unknown;
       };
     }
 
     const { bbThreadId, providerThreadId } = await startThread();
-    expect(
-      (await threadCommands(bbThreadId, providerThreadId)).commands,
-    ).toEqual([]);
+    expect(await threadCommands(bbThreadId, providerThreadId)).toEqual({
+      commands: [],
+      advertised: false,
+    });
 
     const turnId = sendTurnRequest("turn/start", providerThreadId, {
       input: [{ type: "text", text: "advertise-commands", mentions: [] }],
@@ -1593,20 +1595,21 @@ describe("acp bridge", () => {
     await waitForTurnCompleted();
 
     expect(agentMessageTexts()).toContain("echo:advertise-commands");
-    expect(
-      (await threadCommands(bbThreadId, providerThreadId)).commands,
-    ).toEqual([
-      {
-        name: "ui-check",
-        description: "Run UI verification checks",
-        argumentHint: "<fixture>",
-      },
-      {
-        name: "jobs",
-        description: "List background jobs",
-        argumentHint: null,
-      },
-    ]);
+    expect(await threadCommands(bbThreadId, providerThreadId)).toEqual({
+      commands: [
+        {
+          name: "ui-check",
+          description: "Run UI verification checks",
+          argumentHint: "<fixture>",
+        },
+        {
+          name: "jobs",
+          description: "List background jobs",
+          argumentHint: null,
+        },
+      ],
+      advertised: true,
+    });
   }, 30_000);
 
   it("scopes advertised commands per thread", async () => {
@@ -1651,6 +1654,7 @@ describe("acp bridge", () => {
       });
       return (await waitForResponse(id)).result as {
         commands: unknown;
+        advertised: unknown;
       };
     }
 
@@ -1668,10 +1672,13 @@ describe("acp bridge", () => {
     }
 
     await sendAdvertiseTurn("advertise-commands");
-    expect((await threadCommands()).commands).not.toEqual([]);
+    expect(await threadCommands()).toEqual({
+      commands: expect.any(Array),
+      advertised: true,
+    });
 
     await sendAdvertiseTurn("advertise-commands-empty");
-    expect((await threadCommands()).commands).toEqual([]);
+    expect(await threadCommands()).toEqual({ commands: [], advertised: true });
   }, 30_000);
 
   it("drops malformed advertised commands and keeps exact spellings", async () => {
@@ -1697,6 +1704,7 @@ describe("acp bridge", () => {
           argumentHint: "<target>",
         },
       ],
+      advertised: true,
     });
   }, 30_000);
 

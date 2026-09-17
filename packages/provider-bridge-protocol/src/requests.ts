@@ -97,6 +97,7 @@ export type ThreadCommand = z.infer<typeof threadCommandSchema>;
 export const threadCommandsResultSchema = z
   .object({
     commands: z.array(threadCommandSchema),
+    advertised: z.boolean(),
   })
   .passthrough();
 export const threadNameSetParamsSchema = z

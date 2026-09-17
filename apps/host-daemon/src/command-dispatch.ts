@@ -1,5 +1,9 @@
 import { operationEnvironment } from "./operation-environment.js";
 import {
+  readAdvertisedThreadCommands,
+  writeAdvertisedThreadCommands,
+} from "./thread-commands-cache.js";
+import {
   runEnvironmentHook,
   cancelEnvironmentHook,
 } from "./command-handlers/environment-hook.js";
@@ -654,21 +658,34 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
       command.threadId,
     );
     const owner = owners[0];
-    if (!owner) {
-      return { commands: [] };
-    }
-    const result = await owner.runtime.listThreadCommands({
-      threadId: command.threadId,
-    });
-    return {
-      commands: result.commands.map((entry) => ({
+    if (owner) {
+      const result = await owner.runtime.listThreadCommands({
+        threadId: command.threadId,
+      });
+      const commands = result.commands.map((entry) => ({
         name: entry.name,
         source: "command" as const,
         origin: "project" as const,
         description: entry.description,
         argumentHint: entry.argumentHint,
-      })),
-    };
+      }));
+      if (result.advertised) {
+        await writeAdvertisedThreadCommands({
+          threadStorageRootPath: options.threadStorageRootPath,
+          threadId: command.threadId,
+          commands,
+        }).catch(() => undefined);
+        return { commands, advertised: true };
+      }
+    }
+    const cached = await readAdvertisedThreadCommands({
+      threadStorageRootPath: options.threadStorageRootPath,
+      threadId: command.threadId,
+    }).catch(() => null);
+    if (cached !== null) {
+      return { commands: cached, advertised: true };
+    }
+    return { commands: [], advertised: false };
   },
   "host.delete_skill": deleteHostSkill,
   "host.write_skill": writeHostSkill,

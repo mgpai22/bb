@@ -687,7 +687,7 @@ export type HostCommandSource = z.infer<typeof hostCommandSourceSchema>;
 const hostCommandOriginSchema = z.enum(["project", "user"]);
 export type HostCommandOrigin = z.infer<typeof hostCommandOriginSchema>;
 
-const hostProviderCommandSchema = z.object({
+export const hostProviderCommandSchema = z.object({
   name: z.string(),
   source: hostCommandSourceSchema,
   origin: hostCommandOriginSchema,
@@ -1152,6 +1152,10 @@ const pluginHostDisposeResultSchema = z
 const commandListResultSchema = z.object({
   commands: z.array(hostProviderCommandSchema),
 });
+const threadCommandsResultSchema = z.object({
+  commands: z.array(hostProviderCommandSchema),
+  advertised: z.boolean(),
+});
 
 const skillListResultSchema = z.object({
   skills: z.array(discoveredSkillSchema),
@@ -1487,7 +1491,7 @@ export const hostDaemonCommandRegistry = {
   "thread.commands": defineHostDaemonCommandDescriptor({
     type: "thread.commands",
     schema: threadCommandsCommandSchema,
-    resultSchema: commandListResultSchema,
+    resultSchema: threadCommandsResultSchema,
     transport: "onlineRpc",
     retryable: true,
     flushEventsBeforeResult: false,

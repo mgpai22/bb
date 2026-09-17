@@ -320,6 +320,7 @@ export interface AgentRuntime {
 
   listThreadCommands(args: ListThreadCommandsArgs): Promise<{
     commands: ThreadCommand[];
+    advertised: boolean;
   }>;
 
   renameThread(args: RenameThreadArgs): Promise<void>;

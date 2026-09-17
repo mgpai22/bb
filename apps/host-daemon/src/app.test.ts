@@ -270,7 +270,7 @@ function createFakeRuntime(): AgentRuntime {
     },
     async renameThread() {},
     async listThreadCommands() {
-      return { commands: [] };
+      return { commands: [], advertised: false };
     },
     async archiveThread() {},
     async unarchiveThread() {},

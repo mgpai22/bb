@@ -224,6 +224,7 @@ interface AcpThreadSession {
   cursorMcpApproval: CursorMcpApproval | undefined;
   deferStartEmit: AcpDeferredStartEmitter | undefined;
   availableCommands: AcpAdvertisedCommand[];
+  availableCommandsAdvertised: boolean;
 }
 
 type AcpDeferredStartEmitter = (
@@ -1765,6 +1766,7 @@ async function startAgentSession(
     cursorMcpApproval: undefined,
     deferStartEmit: emitStartNotification,
     availableCommands: [],
+    availableCommandsAdvertised: false,
   };
   sessionsByBbThreadId.set(bbThreadId, session);
 
@@ -2276,6 +2278,7 @@ function handleAgentNotification(
     const advertised = normalizeAdvertisedCommands(parsed.data.update);
     if (advertised !== undefined) {
       session.availableCommands = advertised;
+      session.availableCommandsAdvertised = true;
     }
   };
   if (session.providerThreadId === "") {
@@ -2709,7 +2712,7 @@ async function handleRequest(
         session.providerThreadId === "" ||
         request.params.providerThreadId !== session.providerThreadId
       ) {
-        sendResult(request.id, { commands: [] });
+        sendResult(request.id, { commands: [], advertised: false });
         return;
       }
       sendResult(request.id, {
@@ -2718,6 +2721,7 @@ async function handleRequest(
           description: command.description,
           argumentHint: command.argumentHint,
         })),
+        advertised: session.availableCommandsAdvertised,
       });
       return;
     }

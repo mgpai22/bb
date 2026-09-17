@@ -2284,7 +2284,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
               providerThreadId: requireProviderThreadId(threadId),
             });
             if (plan.kind === "noop") {
-              return { commands: [] };
+              return { commands: [], advertised: false };
             }
             return await sendCommand({
               proc,
@@ -2292,7 +2292,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
               resultSchema: threadCommandsResultSchema,
             });
           } catch {
-            return { commands: [] };
+            return { commands: [], advertised: false };
           }
         },
       });

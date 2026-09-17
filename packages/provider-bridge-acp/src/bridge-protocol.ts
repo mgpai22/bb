@@ -109,6 +109,7 @@ export const acpThreadCommandsResultSchema = z
         argumentHint: z.string().nullable(),
       }),
     ),
+    advertised: z.boolean(),
   })
   .passthrough();
 export type AcpThreadCommandsResult = z.infer<
