@@ -370,7 +370,7 @@ export function createFakeRuntime() {
       state.renamedTitle = args.title;
     },
     async listThreadCommands() {
-      return { commands: [] };
+      return { commands: [], advertised: false };
     },
     async archiveThread(args) {
       state.archivedThreadId = args.threadId;

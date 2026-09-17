@@ -309,6 +309,7 @@ const ONLINE_RPC_RESPONSE_RESULT_FIXTURES: OnlineRpcResponseResultFixtures = {
         argumentHint: "<fixture>",
       },
     ],
+    advertised: true,
   },
   "host.list_skills": {
     skills: [
@@ -1077,7 +1078,7 @@ const CONTRIBUTED_ENV = [
 
 describe("host-daemon command schemas", () => {
   it("uses the current host-daemon protocol version", () => {
-    expect(HOST_DAEMON_PROTOCOL_VERSION).toBe(214);
+    expect(HOST_DAEMON_PROTOCOL_VERSION).toBe(215);
     expect(HOST_ARTIFACT_MAX_BYTES).toBe(256 * 1024 * 1024);
   });
 

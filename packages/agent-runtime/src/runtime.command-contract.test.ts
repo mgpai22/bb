@@ -850,6 +850,7 @@ describe("createAgentRuntime command contracts", () => {
       });
       await expect(runtime.listThreadCommands({ threadId: "t1" })).resolves.toEqual({
         commands: [],
+        advertised: false,
       });
       expect(
         record.read().some((entry) => entry.method === "thread/commands"),
