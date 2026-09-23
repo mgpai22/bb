@@ -602,6 +602,15 @@ export interface BbRequester {
   readonly source: "access" | "loopback";
 }
 
+/** `bb.experimental_access`: Cloudflare Access sessions on this server. */
+export interface PluginAccess {
+  /**
+   * Close every open /ws and /ws/* socket whose requester email equals
+   * `email` (compared lowercased). Returns how many sockets closed.
+   */
+  closeSessions(email: string): Promise<{ closed: number }>;
+}
+
 /**
  * What core hands a `message.dispatch` hook: the one checkpoint, run before a
  * message reaches a provider. The exception is a user's explicit Send-now on a
@@ -1979,6 +1988,8 @@ export interface BbPluginApi {
   /** Machine providers provision execution machines. Experimental: see docs/api_to_audit.md. */
   readonly experimental_machines: PluginMachines;
   readonly experimental_serverAccess: PluginServerAccess;
+  /** Cloudflare Access sessions on this server. Experimental. */
+  readonly experimental_access: PluginAccess;
   /** Plugin-reported status (needs-configuration). */
   readonly status: PluginStatusApi;
   /** Read-only facts about the running server (loopback base URL). */

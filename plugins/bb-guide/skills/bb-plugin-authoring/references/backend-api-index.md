@@ -75,6 +75,12 @@ Read the installed declarations for exact current signatures.
 - `PluginEnvironments` — `bb.experimental_environments`: `register` +
   `recheck` (see backend-events.md, environment providers)
 - `PluginServerAccess` — `bb.experimental_serverAccess.register`
+- `PluginAccess` — `bb.experimental_access.closeSessions(email)`: closes that
+  person's open `/ws` sockets (Cloudflare Access); resolves `{ closed }`
+- `BbRequester` — `{ email, source: "access" | "loopback" }`; RPC handlers get it
+  as `context.experimental_requester`, HTTP routes as `c.get("bbRequester")`
+- `PluginRpcHandlerContext` — second argument of every RPC handler:
+  `{ experimental_requester: BbRequester | null }`
 - `ServerAccessProviderDeclaration`
 - `ServerAccessGrant`
 - `PluginMachineProviderResource` — non-null JSON persisted by machine checkpoints and lifecycle results

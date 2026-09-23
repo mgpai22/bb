@@ -100,6 +100,8 @@ export interface PluginServiceDeps {
     | "setPluginDirectory"
   >;
   getAppUrl?: () => string | null;
+  /** Closes a person's open /ws sockets; absent in hosts without them. */
+  closeAccessSessions?: (email: string) => number;
   dataDir: string;
   appVersion: string;
   bundledPlugins?: readonly BundledPluginRegistration[];

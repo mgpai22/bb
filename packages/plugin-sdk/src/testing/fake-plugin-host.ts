@@ -337,6 +337,8 @@ export interface FakePluginInspectionState {
    * condition its own waits depend on has changed.
    */
   readonly recheckCount: number;
+  /** Every `bb.experimental_access.closeSessions` email, in call order. */
+  readonly accessCloseSessionsCalls: string[];
   /** Recorded `bb.sdk` calls + stub control. */
   readonly sdk: FakeSdkHarness;
   readonly registrations: FakePluginRegistrations;
@@ -1071,6 +1073,7 @@ function createFakePluginHostInternal(
   // --- hooks ---
   /** How many times `bb.experimental_hooks.recheck()` was called. */
   let requestedDrains = 0;
+  const accessCloseSessionsCalls: string[] = [];
 
   // --- status ---
   const needsConfigurationMessages: string[] = [];
@@ -1490,6 +1493,13 @@ function createFakePluginHostInternal(
     experimental_hooks,
     experimental_environments,
     experimental_machines,
+    experimental_access: {
+      async closeSessions(email) {
+        assertLive();
+        accessCloseSessionsCalls.push(email);
+        return { closed: 0 };
+      },
+    },
     experimental_serverAccess: {
       register(declaration) {
         assertLive();
@@ -1569,6 +1579,7 @@ function createFakePluginHostInternal(
     logEntries,
     realtimeSignals,
     needsConfigurationMessages,
+    accessCloseSessionsCalls,
     get recheckCount() {
       return requestedDrains;
     },

@@ -59,7 +59,11 @@ import {
   setAuthenticatedDaemon,
   verifyAuthenticatedDaemon,
 } from "./internal/auth.js";
-import { requesterMiddleware } from "./requester.js";
+import {
+  createAccessSessions,
+  getAccessSession,
+  requesterMiddleware,
+} from "./requester.js";
 import {
   captureTrustedRemoteAddress,
   resolveRequestAppSurface,
@@ -476,6 +480,7 @@ export function createApp(
     return runWithTelemetryAppSurface(resolveRequestAppSurface(context), next);
   });
   app.use("*", requesterMiddleware(deps.config.requester, deps.logger));
+  const accessSessions = createAccessSessions();
   app.use("*", async (context, next) => {
     const path = context.req.path;
     if (!path.startsWith("/api/v1/") && !path.startsWith("/internal/")) {
@@ -641,6 +646,7 @@ export function createApp(
     dataDir: deps.config.dataDir,
     appVersion: deps.config.appVersion,
     getAppUrl: () => deps.config.appUrl ?? null,
+    closeAccessSessions: (email) => accessSessions.closeSessions(email),
     sharedPorts: deps.sharedPorts,
     providerRegistry: deps.providerRegistry,
     pluginHostArtifacts: deps.pluginHostArtifacts,
@@ -819,11 +825,18 @@ export function createApp(
     "/ws",
     upgradeWebSocket((context) => {
       assertBrowserWebSocketAllowed(context);
+      const accessSession = getAccessSession(context);
       return {
-        onOpen: (_event, socket) => onClientSocketOpen(deps.hub, socket),
+        onOpen: (_event, socket) => {
+          if (accessSession) accessSessions.track(socket, accessSession);
+          return onClientSocketOpen(deps.hub, socket);
+        },
         onMessage: (event, socket) =>
           onClientSocketMessage(deps, socket, event.data),
-        onClose: (_event, socket) => onClientSocketClose(deps, socket),
+        onClose: (_event, socket) => {
+          accessSessions.untrack(socket);
+          return onClientSocketClose(deps, socket);
+        },
       };
     }),
   );
@@ -832,6 +845,7 @@ export function createApp(
     "/ws/terminals/:terminalId",
     upgradeWebSocket((context) => {
       assertBrowserWebSocketAllowed(context);
+      const accessSession = getAccessSession(context);
       const terminalId = context.req.param("terminalId");
       const query = terminalWebSocketQuerySchema.safeParse({
         sinceSeq: context.req.query("sinceSeq"),
@@ -844,23 +858,27 @@ export function createApp(
         );
       }
       return {
-        onOpen: (_event, socket) =>
-          onTerminalSocketOpen(deps, {
+        onOpen: (_event, socket) => {
+          if (accessSession) accessSessions.track(socket, accessSession);
+          return onTerminalSocketOpen(deps, {
             socket,
             sinceSeq: query.data.sinceSeq,
             terminalId,
-          }),
+          });
+        },
         onMessage: (event, socket) =>
           onTerminalSocketMessage(deps, {
             raw: event.data,
             socket,
             terminalId,
           }),
-        onClose: (_event, socket) =>
-          onTerminalSocketClose(deps, {
+        onClose: (_event, socket) => {
+          accessSessions.untrack(socket);
+          return onTerminalSocketClose(deps, {
             socket,
             terminalId,
-          }),
+          });
+        },
       };
     }),
   );

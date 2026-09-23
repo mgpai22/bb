@@ -25,8 +25,14 @@ type AccessJwk = JsonWebKey & { kid: string };
 
 const ACCESS_JWT_HEADER = "cf-access-jwt-assertion";
 const JWKS_MAX_AGE_MS = 10 * 60_000;
-const JWKS_UNKNOWN_KID_REFETCH_MS = 30_000;
+/** A failed refresh keeps serving keys this young. */
+const JWKS_STALE_MAX_AGE_MS = 60 * 60_000;
+const JWKS_RETRY_MS = 30_000;
 const JWKS_FETCH_TIMEOUT_MS = 5_000;
+const CLOCK_SKEW_LEEWAY_SECONDS = 60;
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
+/** WebSocket close code 1008: policy violation. */
+const ACCESS_SESSION_CLOSE_CODE = 1008;
 
 const bbRequesterSchema = z
   .object({
@@ -53,6 +59,85 @@ export function getBbRequester(
   return parsed.success ? parsed.data : undefined;
 }
 
+export interface AccessSession {
+  email: string;
+  /** The Access JWT `exp`, in milliseconds. */
+  expiresAt: number;
+}
+
+/** The verified Access session behind this request; null for loopback or none. */
+export function getAccessSession(
+  context: RequesterContext,
+): AccessSession | null {
+  const requester = getBbRequester(context);
+  const expiresAt = context.get("bbAccessExpiresAt");
+  return requester?.source === "access" && typeof expiresAt === "number"
+    ? { email: requester.email, expiresAt }
+    : null;
+}
+
+/** Hono's WSContext satisfies this. */
+interface ClosableSocket {
+  close(code?: number, reason?: string): void;
+}
+
+/**
+ * Open /ws and /ws/* sockets by Access identity. Cloudflare's revoke blocks
+ * new requests at the edge but leaves open tunnel sockets alone, so core
+ * closes them: at the JWT `exp`, and on `closeSessions`.
+ */
+export interface AccessSessions {
+  track(socket: ClosableSocket, session: AccessSession): void;
+  untrack(socket: ClosableSocket): void;
+  /** Closes every tracked socket of `email` (compared lowercased); returns the count. */
+  closeSessions(email: string): number;
+}
+
+export function createAccessSessions(): AccessSessions {
+  const sessions = new Map<
+    ClosableSocket,
+    { email: string; timer: ReturnType<typeof setTimeout> }
+  >();
+
+  function untrack(socket: ClosableSocket): void {
+    const session = sessions.get(socket);
+    if (session === undefined) return;
+    clearTimeout(session.timer);
+    sessions.delete(socket);
+  }
+
+  function close(socket: ClosableSocket): void {
+    untrack(socket);
+    socket.close(ACCESS_SESSION_CLOSE_CODE, "Cloudflare Access session ended");
+  }
+
+  function track(socket: ClosableSocket, session: AccessSession): void {
+    untrack(socket);
+    const delay = session.expiresAt - Date.now();
+    // setTimeout fires at once past 2^31-1 ms, so a far exp re-arms.
+    const timer = setTimeout(
+      () =>
+        Date.now() >= session.expiresAt ? close(socket) : track(socket, session),
+      Math.min(Math.max(delay, 0), MAX_TIMER_DELAY_MS),
+    );
+    timer.unref();
+    sessions.set(socket, { email: session.email, timer });
+  }
+
+  return {
+    track,
+    untrack,
+    closeSessions(email) {
+      const target = email.toLowerCase();
+      const matches = [...sessions]
+        .filter(([, session]) => session.email === target)
+        .map(([socket]) => socket);
+      for (const socket of matches) close(socket);
+      return matches.length;
+    },
+  };
+}
+
 function invalidAccessJwt(): ApiError {
   return new ApiError(
     401,
@@ -63,8 +148,9 @@ function invalidAccessJwt(): ApiError {
 
 /**
  * Reads the Access keys at most every 10 minutes, and again on an unknown
- * `kid` at most once per 30 seconds. A failed fetch is a 503: without keys
- * the server cannot tell an Access user from a forgery.
+ * `kid` at most once per 30 seconds. A failed refresh keeps serving keys
+ * younger than 1 hour and retries 30 seconds later. With no usable keys a
+ * failed fetch is a 503: the server cannot tell an Access user from a forgery.
  */
 function createJwksCache(url: string, logger: ServerLogger) {
   let keys: AccessJwk[] | null = null;
@@ -87,6 +173,9 @@ function createJwksCache(url: string, logger: ServerLogger) {
       return keys;
     } catch (error) {
       logger.warn({ err: error, url }, "Cloudflare Access keys are unavailable");
+      if (keys !== null && Date.now() - fetchedAt < JWKS_STALE_MAX_AGE_MS) {
+        return keys;
+      }
       throw new ApiError(
         503,
         "access_jwks_unavailable",
@@ -98,15 +187,15 @@ function createJwksCache(url: string, logger: ServerLogger) {
   }
 
   return async function keyFor(kid: string): Promise<AccessJwk | undefined> {
+    const age = Date.now() - fetchedAt;
+    const mustFetch =
+      keys === null ||
+      age >= JWKS_STALE_MAX_AGE_MS ||
+      (age >= JWKS_MAX_AGE_MS && Date.now() - attemptedAt >= JWKS_RETRY_MS);
     let current =
-      keys !== null && Date.now() - fetchedAt < JWKS_MAX_AGE_MS
-        ? keys
-        : await (pending ??= fetchKeys());
+      mustFetch || keys === null ? await (pending ??= fetchKeys()) : keys;
     let key = current.find((candidate) => candidate.kid === kid);
-    if (
-      key === undefined &&
-      Date.now() - attemptedAt >= JWKS_UNKNOWN_KID_REFETCH_MS
-    ) {
+    if (key === undefined && Date.now() - attemptedAt >= JWKS_RETRY_MS) {
       current = await (pending ??= fetchKeys());
       key = current.find((candidate) => candidate.kid === kid);
     }
@@ -154,15 +243,30 @@ export function requesterMiddleware(
     if (typeof kid !== "string") throw invalidAccessJwt();
     const key = await keyFor(kid);
     if (key === undefined) throw invalidAccessJwt();
+    // Time claims are checked here, not by hono, for the skew leeway and
+    // because hono skips a missing or zero exp.
     const payload = await verify(token, key, {
       alg: "RS256",
       iss: `https://${access.teamDomain}`,
       aud: access.aud,
+      exp: false,
+      iat: false,
+      nbf: false,
     }).catch(() => {
       throw invalidAccessJwt();
     });
-    // hono's verify skips a missing exp; an Access token always carries one.
-    if (typeof payload.exp !== "number") throw invalidAccessJwt();
+    const now = Date.now() / 1000;
+    const latestStart = now + CLOCK_SKEW_LEEWAY_SECONDS;
+    if (
+      typeof payload.exp !== "number" ||
+      payload.exp <= now ||
+      (payload.nbf !== undefined &&
+        (typeof payload.nbf !== "number" || payload.nbf > latestStart)) ||
+      (payload.iat !== undefined &&
+        (typeof payload.iat !== "number" || payload.iat > latestStart))
+    ) {
+      throw invalidAccessJwt();
+    }
     const email = payload.email;
     if (typeof email !== "string" || email.length === 0) {
       throw invalidAccessJwt();
@@ -171,6 +275,7 @@ export function requesterMiddleware(
       context,
       Object.freeze({ email: email.toLowerCase(), source: "access" }),
     );
+    context.set("bbAccessExpiresAt", payload.exp * 1000);
     return next();
   };
 }

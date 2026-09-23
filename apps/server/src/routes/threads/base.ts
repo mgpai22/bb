@@ -36,6 +36,7 @@ import {
 import type { Hono } from "hono";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import type { BbRequester } from "@get-bb/plugin-sdk";
 import { getBbRequester } from "../../requester.js";
 import {
   parseInteger,
@@ -342,14 +343,10 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if (payload.sectionId) {
       requireThreadSection(deps, payload.sectionId);
     }
-    // A plugin-started thread (sdk spawn/fork) runs on the plugin's behalf,
-    // not the loopback caller's, so its first pass gets no requester.
-    const requester =
-      payload.origin === "plugin" ? null : (getBbRequester(context) ?? null);
     const thread = await createThreadFromRequest(
       deps,
       { ...payload, origin: payload.origin },
-      { requester },
+      { requester: creationRequester(context, payload.origin) },
     );
     return context.json(toThreadResponseFromThread(deps, { thread }), 201);
   });
@@ -358,10 +355,25 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     const thread = await createThreadForkFromRequest(
       deps,
       payload,
-      payload.origin === "plugin" ? null : (getBbRequester(context) ?? null),
+      creationRequester(context, payload.origin),
     );
     return context.json(toThreadResponseFromThread(deps, { thread }), 201);
   });
+
+  /**
+   * A plugin-started thread (sdk spawn/fork) reaches core over loopback, so
+   * its loopback requester is the plugin, not a person: drop it. `origin` is
+   * client-supplied, so it never erases a verified Access identity.
+   */
+  function creationRequester(
+    context: Parameters<typeof getBbRequester>[0],
+    origin: string | undefined,
+  ): BbRequester | null {
+    const requester = getBbRequester(context) ?? null;
+    return origin === "plugin" && requester?.source === "loopback"
+      ? null
+      : requester;
+  }
 
   get(routes.get, (context, query) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));

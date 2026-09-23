@@ -1432,6 +1432,7 @@ export function createPluginRuntime(context: PluginRuntimeContext) {
         return context.machineEnrollments.forOwner(row.id);
       },
       getAppUrl: deps.getAppUrl ?? (() => null),
+      closeAccessSessions: deps.closeAccessSessions ?? (() => 0),
       getLoopbackBaseUrl: () => boundLoopbackBaseUrl,
       publishSignal: (channel, payload) => {
         deps.hub.notifyPluginSignal(row.id, channel, payload);

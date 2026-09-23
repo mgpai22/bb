@@ -453,6 +453,8 @@ export function createPluginApi(options: {
   getSdk: () => BbSdk | undefined;
   getMachineEnrollments: () => MachineEnrollments;
   getAppUrl: () => string | null;
+  /** Closes a person's open /ws sockets and returns how many closed. */
+  closeAccessSessions: (email: string) => number;
   getLoopbackBaseUrl: () => string | undefined;
   publishSignal: (channel: string, payload: unknown) => void;
   settingsChanged: () => void;
@@ -525,6 +527,7 @@ export function createPluginApi(options: {
     dataDir,
     getSdk,
     getAppUrl,
+    closeAccessSessions,
     getLoopbackBaseUrl,
     publishSignal,
     settingsChanged,
@@ -1295,6 +1298,15 @@ export function createPluginApi(options: {
     experimental_environments,
     experimental_machines,
     experimental_serverAccess,
+    experimental_access: {
+      async closeSessions(email) {
+        assertLive();
+        if (typeof email !== "string" || email.length === 0) {
+          throw new Error("closeSessions email must be a non-empty string");
+        }
+        return { closed: closeAccessSessions(email) };
+      },
+    },
     status,
     server,
     hosts,

@@ -188,6 +188,11 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
           },
     loopbackIdentity: serverConfig.BB_LOOPBACK_IDENTITY ?? null,
   };
+  logger.info(
+    runtimeConfig.requester.access === null
+      ? "Cloudflare Access verification: off"
+      : `Cloudflare Access verification: on (${runtimeConfig.requester.access.teamDomain})`,
+  );
   const terminalSessions = new TerminalSessionLifecycle({
     config: runtimeConfig,
     db,

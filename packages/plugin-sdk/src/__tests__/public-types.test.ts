@@ -15,6 +15,7 @@ type ExpectedBbPluginApiKey =
   | "background"
   | "cli"
   | "events"
+  | "experimental_access"
   | "experimental_aiServices"
   | "experimental_environments"
   | "experimental_hooks"
@@ -40,6 +41,7 @@ const EXPECTED_BACKEND_ROOT_TYPE_EXPORTS = [
   "BbPluginApi",
   "MessageDispatchHookContext",
   "MessageDispatchHookDecision",
+  "PluginAccess",
   "PluginAgents",
   "PluginAiServiceDeclaration",
   "PluginAiServiceKind",
