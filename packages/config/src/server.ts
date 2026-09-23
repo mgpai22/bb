@@ -13,6 +13,10 @@ import {
   resolveEnvLoader,
 } from "./env.js";
 import {
+  BB_ACCESS_AUD_ENV,
+  BB_ACCESS_JWKS_URL_ENV,
+  BB_ACCESS_TEAM_DOMAIN_ENV,
+  BB_LOOPBACK_IDENTITY_ENV,
   BB_APP_URL_ENV,
   BB_APP_SURFACE_ENV,
   BB_APP_VERSION_ENV,
@@ -49,6 +53,10 @@ import { loadServerPortConfig, type ServerPortConfig } from "./server-port.js";
 
 export interface ServerConfig
   extends CommonConfig, DatabaseConfig, ServerPortConfig {
+  BB_ACCESS_AUD?: string;
+  BB_ACCESS_JWKS_URL?: string;
+  BB_ACCESS_TEAM_DOMAIN?: string;
+  BB_LOOPBACK_IDENTITY?: string;
   BB_APP_URL: string;
   BB_APP_SURFACE: AppSurface;
   BB_APP_VERSION: string;
@@ -210,6 +218,52 @@ export function loadServerConfig(
       env: loader.env,
     }),
   });
+  const accessEnvVars = {
+    BB_ACCESS_AUD: BB_ACCESS_AUD_ENV,
+    BB_ACCESS_JWKS_URL: BB_ACCESS_JWKS_URL_ENV,
+    BB_ACCESS_TEAM_DOMAIN: BB_ACCESS_TEAM_DOMAIN_ENV,
+    BB_LOOPBACK_IDENTITY: BB_LOOPBACK_IDENTITY_ENV,
+  } as const;
+  for (const key of Object.keys(accessEnvVars) as Array<
+    keyof typeof accessEnvVars
+  >) {
+    assignIfDefined({
+      key,
+      target: config,
+      value: readOptionalEnvVar({
+        context: loader.context,
+        definition: accessEnvVars[key],
+        env: loader.env,
+      }),
+    });
+  }
+  assertAccessConfig(config);
 
   return config;
+}
+
+/**
+ * Access verification is on when the team domain and AUD are both set, and
+ * then needs a loopback identity. Both unset is off. Anything else is a
+ * half-configured check, so the server refuses to start.
+ */
+function assertAccessConfig(config: ServerConfig): void {
+  const hasTeamDomain = config.BB_ACCESS_TEAM_DOMAIN !== undefined;
+  const hasAud = config.BB_ACCESS_AUD !== undefined;
+  if (hasTeamDomain && !hasAud) {
+    throw new Error("BB_ACCESS_AUD is required when BB_ACCESS_TEAM_DOMAIN is set");
+  }
+  if (hasAud && !hasTeamDomain) {
+    throw new Error("BB_ACCESS_TEAM_DOMAIN is required when BB_ACCESS_AUD is set");
+  }
+  if (hasTeamDomain && config.BB_LOOPBACK_IDENTITY === undefined) {
+    throw new Error(
+      "BB_LOOPBACK_IDENTITY is required when BB_ACCESS_TEAM_DOMAIN and BB_ACCESS_AUD are set",
+    );
+  }
+  if (!hasTeamDomain && config.BB_ACCESS_JWKS_URL !== undefined) {
+    throw new Error(
+      "BB_ACCESS_TEAM_DOMAIN and BB_ACCESS_AUD are required when BB_ACCESS_JWKS_URL is set",
+    );
+  }
 }

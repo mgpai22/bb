@@ -6,6 +6,7 @@ import {
   defineRpcContract,
   type BbPluginApi,
   type PluginCliContext,
+  type PluginRpcHandlerContext,
   type PluginRpcHandlers,
 } from "@get-bb/plugin-sdk";
 import { z } from "zod";
@@ -1792,7 +1793,10 @@ export default async function plugin(
   function routeRpc<Schema extends z.ZodType>(
     routePath: string,
     schema: Schema,
-    handle: (input: z.output<Schema>) => object | Promise<object>,
+    handle: (
+      input: z.output<Schema>,
+      context: PluginRpcHandlerContext,
+    ) => object | Promise<object>,
   ): void {
     bb.http.route(
       "POST",
@@ -1800,7 +1804,10 @@ export default async function plugin(
       async (context) => {
         const input = await readHttpInput(context, schema);
         if (!input.ok) return input.response;
-        return context.json(await handle(input.value));
+        // Token-auth CLI routes have no HTTP caller identity.
+        return context.json(
+          await handle(input.value, { experimental_requester: null }),
+        );
       },
       { auth: "token" },
     );
@@ -2665,13 +2672,19 @@ export default async function plugin(
         let warning = "";
         if (args.command === "vaults") result = listVaults();
         else if (args.command === "vault-add")
-          result = await handlers.createVault({
-            name: args.positionals[0],
-            rootPath: args.positionals[1],
-            hostId: args.positionals[2],
-          });
+          result = await handlers.createVault(
+            {
+              name: args.positionals[0],
+              rootPath: args.positionals[1],
+              hostId: args.positionals[2],
+            },
+            { experimental_requester: null },
+          );
         else if (args.command === "vault-remove")
-          result = await handlers.removeVault({ vaultId: args.positionals[0] });
+          result = await handlers.removeVault(
+            { vaultId: args.positionals[0] },
+            { experimental_requester: null },
+          );
         else if (args.command === "list")
           result = await notebookData(args.vaultId);
         else if (args.command === "read")
@@ -2713,10 +2726,13 @@ export default async function plugin(
           warning =
             "Deprecated: direct Docs mutations will be removed; use bb docs pull, edit local files, then bb docs push.";
         } else if (args.command === "mkdir") {
-          result = await handlers.createFolder({
-            vaultId: args.vaultId,
-            path: args.positionals[0],
-          });
+          result = await handlers.createFolder(
+            {
+              vaultId: args.vaultId,
+              path: args.positionals[0],
+            },
+            { experimental_requester: null },
+          );
           warning =
             "Deprecated: direct Docs mutations will be removed; use bb docs pull, edit local files, then bb docs push.";
         } else if (args.command === "move") {

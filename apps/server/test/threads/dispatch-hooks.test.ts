@@ -336,6 +336,7 @@ describe("pending admission races", () => {
           source: { kind: "inline" },
           queuePayload: { kind: "inline" },
           pluginSubmission: null,
+          requester: null,
           origin: null,
           originPluginId: null,
           startedOnBehalfOf: null,

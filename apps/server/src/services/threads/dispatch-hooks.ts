@@ -101,6 +101,8 @@ export interface MessageDispatchHookPassRequest {
   /** The queued row being re-attempted; null for an inline first attempt. */
   queuedMessage: ThreadQueuedMessage | null;
   pluginSubmission: MessageDispatchHookContext["experimental_submission"];
+  /** The HTTP caller of the create, fork, or send route; null otherwise. */
+  requester: MessageDispatchHookContext["experimental_requester"];
   continueAfterHooks?: () => Promise<void>;
 }
 
@@ -316,6 +318,7 @@ function buildHookContext(
     parentThreadId: request.parentThreadId,
     queuedMessage: request.queuedMessage,
     experimental_submission: request.pluginSubmission,
+    experimental_requester: request.requester,
   };
 }
 

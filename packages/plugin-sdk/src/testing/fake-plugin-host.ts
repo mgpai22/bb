@@ -111,6 +111,7 @@ import type {
   PluginThreadEventPayloads,
   PluginUi,
   PluginRpcError,
+  PluginRpcHandlerContext,
   StandardSchemaV1,
   JsonValue,
 } from "@get-bb/plugin-sdk";
@@ -372,9 +373,14 @@ export interface FakePluginBehaviorDrivers {
   /**
    * Invoke a registered rpc method with host semantics: input/output schemas,
    * strict JSON result normalization, and structured failure codes. Rejects
-   * with the same message/code/issues the frontend client surfaces.
+   * with the same message/code/issues the frontend client surfaces. `context`
+   * is the handler's second argument; `experimental_requester` defaults to null.
    */
-  callRpc(method: string, input?: unknown): Promise<unknown>;
+  callRpc(
+    method: string,
+    input?: unknown,
+    context?: PluginRpcHandlerContext,
+  ): Promise<unknown>;
   /**
    * Invoke the plugin's CLI command with host semantics: the result's
    * exitCode must be a number, stdout/stderr default to "", and a throwing
@@ -588,7 +594,7 @@ interface FakeRpcRecord {
   publication: ReturnType<typeof publishRpcMethod>;
   inputSchema: StandardSchemaV1;
   outputSchema: StandardSchemaV1;
-  handler: (input: never) => unknown;
+  handler: (input: never, context: PluginRpcHandlerContext) => unknown;
 }
 
 type FakeHostWorkerExitSubscription = (event: {
@@ -1734,7 +1740,7 @@ function createFakePluginHostInternal(
       await setSettingsValues(values);
     },
 
-    async callRpc(method, input) {
+    async callRpc(method, input, context) {
       const record = rpcHandlers.get(method);
       if (!record) {
         return throwRpcError({
@@ -1754,7 +1760,9 @@ function createFakePluginHostInternal(
       );
       let result: unknown;
       try {
-        result = await record.handler(validatedInput as never);
+        result = await record.handler(validatedInput as never, {
+          experimental_requester: context?.experimental_requester ?? null,
+        });
       } catch (error) {
         return throwRpcError({
           code: "handler_error",

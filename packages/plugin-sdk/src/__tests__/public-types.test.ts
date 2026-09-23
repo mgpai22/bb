@@ -36,6 +36,7 @@ type ExpectedBbPluginApiKey =
   | "ui";
 
 const EXPECTED_BACKEND_ROOT_TYPE_EXPORTS = [
+  "BbRequester",
   "BbPluginApi",
   "MessageDispatchHookContext",
   "MessageDispatchHookDecision",
@@ -148,6 +149,7 @@ const EXPECTED_RPC_ROOT_TYPE_EXPORTS = [
   "PluginRpcError",
   "PluginRpcErrorCode",
   "PluginRpcHandlers",
+  "PluginRpcHandlerContext",
   "PluginRpcIssuePathSegment",
   "PluginRpcMethodContract",
   "PluginRpcResult",

@@ -1,3 +1,4 @@
+import type { BbRequester } from "@get-bb/plugin-sdk";
 import { requestThreadStorageDeletion } from "./thread-lifecycle.js";
 import { assertEnvironmentPathAvailable } from "../environments/path-admission.js";
 import {
@@ -369,6 +370,7 @@ async function createPendingThreadAndAttemptFirstDispatch(
   args: CreateProvisioningThreadArgs & {
     environmentIntent: ThreadProvisionEnvironmentIntent;
     sendAt: number | undefined;
+    requester: BbRequester | null;
   },
 ) {
   const environment =
@@ -447,6 +449,7 @@ async function createPendingThreadAndAttemptFirstDispatch(
       source: { kind: "inline" },
       queuePayload: { kind: "inline" },
       pluginSubmission: args.request.pluginSubmission ?? null,
+      requester: args.requester,
       startContext,
       executionDefaults: executionPlanArgs,
       origin: args.request.origin,
@@ -522,6 +525,8 @@ export async function createThreadFromRequest(
   options: {
     providerInput?: ThreadCreateServiceRequestInput["input"];
     forkSourceEnvironmentId?: string;
+    /** The HTTP caller of POST /threads or /threads/fork; null or absent otherwise. */
+    requester?: BbRequester | null;
   } = {},
 ) {
   const project = requirePublicProjectForThreadCreate(
@@ -781,6 +786,7 @@ export async function createThreadFromRequest(
   const thread = await createPendingThreadAndAttemptFirstDispatch(deps, {
     ...createArgs,
     sendAt: request.sendAt,
+    requester: options.requester ?? null,
   });
   deps.telemetry.capture({
     name: "thread_created",

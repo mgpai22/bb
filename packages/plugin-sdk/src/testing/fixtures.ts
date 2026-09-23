@@ -224,6 +224,7 @@ export function makeMessageDispatchHookContext(
     startedOnBehalfOf: null,
     parentThreadId: null,
     environmentIntent: null,
+    experimental_requester: null,
   };
   const environmentDefaults: NonNullable<
     MessageDispatchHookContext["environment"]

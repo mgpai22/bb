@@ -2,6 +2,7 @@ import { getEnvironment, getThread } from "@bb/db";
 import type { EnvironmentRow } from "@bb/db";
 import type { PromptInput, Thread } from "@bb/domain";
 import type { ForkThreadRequest } from "@bb/server-contract";
+import type { BbRequester } from "@get-bb/plugin-sdk";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
 import { resolveExistingThreadPermissionMode } from "./thread-execution-plan.js";
@@ -62,6 +63,7 @@ function requireSourceEnvironment(
 export async function createThreadForkFromRequest(
   deps: ThreadForkDeps,
   request: ForkThreadRequest,
+  requester: BbRequester | null = null,
 ) {
   const sourceThread = requireForkSourceThread(deps, request.sourceThreadId);
   requireForkCapableProvider(deps, sourceThread);
@@ -115,6 +117,7 @@ export async function createThreadForkFromRequest(
     {
       forkSourceEnvironmentId: sourceEnvironment.id,
       ...(isSeedOnlyIdleFork ? { providerInput: [] } : {}),
+      requester,
     },
   );
 }

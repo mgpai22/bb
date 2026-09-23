@@ -591,6 +591,18 @@ export interface PluginDispatchInput {
 export type PluginDispatchAttemptKind = "start-turn" | "join-turn";
 
 /**
+ * The person behind an HTTP request. Plugin HTTP handlers read it with
+ * `context.get("bbRequester")`; RPC handlers and the `message.dispatch` hook
+ * receive it as `experimental_requester`.
+ */
+export interface BbRequester {
+  /** Lowercased email. */
+  readonly email: string;
+  /** "access": a verified Cloudflare Access JWT. "loopback": no JWT on the request. */
+  readonly source: "access" | "loopback";
+}
+
+/**
  * What core hands a `message.dispatch` hook: the one checkpoint, run before a
  * message reaches a provider. The exception is a user's explicit Send-now on a
  * queued row, which bypasses the pass by design — it is the user overriding
@@ -658,6 +670,13 @@ export interface MessageDispatchHookContext {
   originPluginId: string | null;
   startedOnBehalfOf: StartedOnBehalfOf | null;
   parentThreadId: string | null;
+  /**
+   * The HTTP caller whose request runs this pass: POST /threads (create),
+   * POST /threads/fork, and POST /threads/:id/send. null for every pass that
+   * does not run inside such a request: queue drains, restarts, retries after
+   * restart, automations, plugin-started threads, and parent system messages.
+   */
+  readonly experimental_requester: BbRequester | null;
 }
 
 /**

@@ -11,6 +11,7 @@ import type {
 } from "@get-bb/plugin-sdk";
 import type { ServerRuntimeConfig } from "../types.js";
 import { ApiError } from "../errors.js";
+import { getBbRequester } from "../requester.js";
 import {
   browserRequestProblem,
   type BrowserRequestProblem,
@@ -843,6 +844,7 @@ export function registerPluginRoutes(
       method,
       lookup.value,
       input,
+      { experimental_requester: getBbRequester(context) ?? null },
     );
     if (!outcome.ok) {
       return context.json(

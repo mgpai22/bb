@@ -227,6 +227,11 @@ export interface DispatchAttemptArgs {
   /** What the queued row would carry; `retry` for a re-submitted failed turn. */
   queuePayload: QueuedMessagePayload;
   pluginSubmission: MessageDispatchHookContext["experimental_submission"];
+  /**
+   * The HTTP caller of the create, fork, or send route. null for every other
+   * attempt; core does not persist it on queued rows.
+   */
+  requester: MessageDispatchHookContext["experimental_requester"];
   /** Retry provenance, when this attempt re-submits a failed turn. */
   retryOf?: TurnRequestRetryMarker;
   origin: ThreadCreateOrigin | null;
@@ -528,6 +533,7 @@ async function runDispatchAttempt(
       queuedMessage:
         claimed?.[0] === undefined ? null : toThreadQueuedMessage(claimed[0]),
       pluginSubmission: args.pluginSubmission,
+      requester: args.requester,
       continueAfterHooks: continueThroughCoreWaits,
     });
     if (outcome.kind === "wait") {

@@ -31,6 +31,7 @@ import {
 } from "@bb/domain";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import { getBbRequester } from "../../requester.js";
 import {
   emitPluginMessageCancelled,
   emitPluginThreadUnarchived,
@@ -230,7 +231,11 @@ export function registerThreadActionRoutes(app: Hono, deps: AppDeps): void {
   post(routes.send, async (context, payload) => {
     const thread = requirePublicThread(deps.db, context.req.param("id"));
     return context.json(
-      await acceptThreadSendRequest(deps, { payload, thread }),
+      await acceptThreadSendRequest(deps, {
+        payload,
+        thread,
+        requester: getBbRequester(context) ?? null,
+      }),
     );
   });
 

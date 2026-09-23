@@ -59,6 +59,7 @@ import {
   setAuthenticatedDaemon,
   verifyAuthenticatedDaemon,
 } from "./internal/auth.js";
+import { requesterMiddleware } from "./requester.js";
 import {
   captureTrustedRemoteAddress,
   resolveRequestAppSurface,
@@ -474,6 +475,7 @@ export function createApp(
     captureTrustedRemoteAddress(context);
     return runWithTelemetryAppSurface(resolveRequestAppSurface(context), next);
   });
+  app.use("*", requesterMiddleware(deps.config.requester, deps.logger));
   app.use("*", async (context, next) => {
     const path = context.req.path;
     if (!path.startsWith("/api/v1/") && !path.startsWith("/internal/")) {

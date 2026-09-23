@@ -212,6 +212,35 @@ export const BB_MARKETPLACE_URL_ENV = defineEnvVar<string>({
   parse: parseOptionalUrlEnvValue,
 });
 
+export const BB_ACCESS_TEAM_DOMAIN_ENV = defineEnvVar<string | undefined>({
+  description:
+    "Cloudflare Zero Trust team domain, such as example.cloudflareaccess.com. With BB_ACCESS_AUD it turns on Access JWT verification for /api/v1 and /ws.",
+  name: "BB_ACCESS_TEAM_DOMAIN",
+  parse: parseOptionalTrimmedStringEnvValue,
+});
+
+export const BB_ACCESS_AUD_ENV = defineEnvVar<string | undefined>({
+  description:
+    "Cloudflare Access application AUD tag. The Access JWT aud claim must contain it.",
+  name: "BB_ACCESS_AUD",
+  parse: parseOptionalTrimmedStringEnvValue,
+});
+
+export const BB_ACCESS_JWKS_URL_ENV = defineEnvVar<string | undefined>({
+  description:
+    "Override for the Cloudflare Access JWKS URL, for tests. The issuer check still uses BB_ACCESS_TEAM_DOMAIN.",
+  name: "BB_ACCESS_JWKS_URL",
+  parse: (args) =>
+    toOptionalString(validateOptionalUrl(args.name, args.value)),
+});
+
+export const BB_LOOPBACK_IDENTITY_ENV = defineEnvVar<string | undefined>({
+  description:
+    "Email of the requester for a request with no Cloudflare Access JWT. Required when Access verification is on.",
+  name: "BB_LOOPBACK_IDENTITY",
+  parse: (args) => toOptionalString(args.value)?.toLowerCase(),
+});
+
 export const BB_INFERENCE_ENV = defineEnvVar<string>({
   description: "Inference model used for server-side completions",
   name: "BB_INFERENCE",

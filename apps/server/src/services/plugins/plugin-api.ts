@@ -71,6 +71,7 @@ import type {
   PluginThreadEventHandler,
   PluginThreadEventName,
   PluginUi,
+  PluginRpcHandlerContext,
   StandardSchemaV1,
   PluginRpcContract,
 } from "@get-bb/plugin-sdk";
@@ -187,7 +188,7 @@ export interface PluginRpcHandler {
   publication: ReturnType<typeof publishRpcMethod>;
   inputSchema: StandardSchemaV1;
   outputSchema: StandardSchemaV1;
-  handler: (input: unknown) => unknown;
+  handler: (input: unknown, context: PluginRpcHandlerContext) => unknown;
 }
 
 export interface PluginAgentToolRecord {

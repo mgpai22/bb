@@ -1,3 +1,5 @@
+import type { BbRequester } from "./backend-contract.js";
+
 /** A JSON-safe path segment reported by a Standard Schema validation issue. */
 export type PluginRpcIssuePathSegment = string | number;
 
@@ -85,9 +87,16 @@ export function defineRpcContract<const Contract extends PluginRpcContract>(
   return contract;
 }
 
+/** Second argument core passes to every RPC handler. */
+export interface PluginRpcHandlerContext {
+  /** The caller of this RPC. null when the check is inactive and no loopback identity is set. */
+  readonly experimental_requester: BbRequester | null;
+}
+
 export type PluginRpcHandlers<Contract extends PluginRpcContract> = {
   [Method in keyof Contract]: (
     input: StandardSchemaV1InferOutput<Contract[Method]["input"]>,
+    context: PluginRpcHandlerContext,
   ) =>
     | StandardSchemaV1InferInput<Contract[Method]["output"]>
     | Promise<StandardSchemaV1InferInput<Contract[Method]["output"]>>;

@@ -62,6 +62,7 @@ import type {
 import type { JsonValue } from "../json-value.js";
 import type {
   PluginRpcError,
+  PluginRpcHandlerContext,
   PluginRpcMethodContract,
   PluginRpcValidationIssue,
   StandardSchemaV1,
@@ -2914,7 +2915,7 @@ type RpcRegistrationRecord = {
   publication: ReturnType<typeof publishRpcMethod>;
   inputSchema: StandardSchemaV1;
   outputSchema: StandardSchemaV1;
-  handler: (input: unknown) => unknown;
+  handler: (input: unknown, context: PluginRpcHandlerContext) => unknown;
 };
 
 export function normalizeRpcRegistration(

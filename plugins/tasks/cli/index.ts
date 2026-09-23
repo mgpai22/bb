@@ -133,7 +133,23 @@ interface PluginStatus {
   version: string;
 }
 
-type TasksDomain = ReturnType<typeof registerHandlers>;
+type TasksHandlers = ReturnType<typeof registerHandlers>;
+/** The rpc handlers, called directly by the CLI, which has no HTTP caller. */
+export type TasksDomain = {
+  [Method in keyof TasksHandlers]: (
+    input: Parameters<TasksHandlers[Method]>[0],
+  ) => ReturnType<TasksHandlers[Method]>;
+};
+const CLI_RPC_CONTEXT = { experimental_requester: null };
+
+function cliDomain(handlers: TasksHandlers): TasksDomain {
+  return Object.fromEntries(
+    Object.entries(handlers).map(([method, handler]) => [
+      method,
+      (input: never) => handler(input, CLI_RPC_CONTEXT),
+    ]),
+  ) as TasksDomain;
+}
 type ListTasksInput = Parameters<TasksDomain["listTasks"]>[0];
 
 function normalizePrefix(value: string): string {
@@ -1817,6 +1833,7 @@ async function runDispatch(
         presetId: preset.id,
         extraInstructions: option(args, "instructions"),
       }),
+      CLI_RPC_CONTEXT,
     ),
   );
   return args.flags.has("json")
@@ -1855,6 +1872,7 @@ async function runAttach(
         taskId: task.id,
         threadId,
       }),
+      CLI_RPC_CONTEXT,
     ),
   );
   return args.flags.has("json")
@@ -1881,6 +1899,7 @@ async function runDetach(
         taskId: task.id,
         threadId,
       }),
+      CLI_RPC_CONTEXT,
     ),
   );
   return args.flags.has("json")
@@ -1940,7 +1959,7 @@ export function registerTasksCli(
   store: TasksApiStore,
   status: PluginStatus,
 ): void {
-  const domain = registerHandlers(bb, store);
+  const domain = cliDomain(registerHandlers(bb, store));
   bb.cli.register({
     name: "tasks",
     summary:

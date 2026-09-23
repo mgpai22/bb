@@ -225,6 +225,7 @@ export async function retryFailedTurn(
         reason: request.reason,
       },
       pluginSubmission: null,
+      requester: null,
       retryOf: { requestId: originalRequestId, attempt },
       origin: null,
       originPluginId: null,

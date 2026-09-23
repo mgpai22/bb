@@ -36,6 +36,7 @@ import {
 import type { Hono } from "hono";
 import type { AppDeps } from "../../types.js";
 import { ApiError } from "../../errors.js";
+import { getBbRequester } from "../../requester.js";
 import {
   parseInteger,
   parsePaginationQuery,
@@ -341,15 +342,24 @@ export function registerThreadBaseRoutes(app: Hono, deps: AppDeps): void {
     if (payload.sectionId) {
       requireThreadSection(deps, payload.sectionId);
     }
-    const thread = await createThreadFromRequest(deps, {
-      ...payload,
-      origin: payload.origin,
-    });
+    // A plugin-started thread (sdk spawn/fork) runs on the plugin's behalf,
+    // not the loopback caller's, so its first pass gets no requester.
+    const requester =
+      payload.origin === "plugin" ? null : (getBbRequester(context) ?? null);
+    const thread = await createThreadFromRequest(
+      deps,
+      { ...payload, origin: payload.origin },
+      { requester },
+    );
     return context.json(toThreadResponseFromThread(deps, { thread }), 201);
   });
 
   post(routes.fork, async (context, payload) => {
-    const thread = await createThreadForkFromRequest(deps, payload);
+    const thread = await createThreadForkFromRequest(
+      deps,
+      payload,
+      payload.origin === "plugin" ? null : (getBbRequester(context) ?? null),
+    );
     return context.json(toThreadResponseFromThread(deps, { thread }), 201);
   });
 

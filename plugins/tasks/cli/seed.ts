@@ -1,8 +1,6 @@
-import type { registerHandlers } from "../api";
 import { tasksRpcContract, type Task } from "../shared/contract";
 import { allocatePrefix } from "./args";
-
-type TasksDomain = ReturnType<typeof registerHandlers>;
+import type { TasksDomain } from "./index";
 
 interface SeedDemoResult {
   foldersCreated: number;

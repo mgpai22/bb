@@ -3,6 +3,7 @@ import type {
   SendMessageRequest,
   SendMessageResponse,
 } from "@bb/server-contract";
+import type { BbRequester } from "@get-bb/plugin-sdk";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { attemptDispatch } from "./dispatch-attempt.js";
 import { requireThreadCommandEnvironment } from "./thread-command-environment.js";
@@ -11,6 +12,8 @@ import { sendThreadMessage } from "./thread-send.js";
 interface AcceptThreadSendRequestArgs {
   payload: SendMessageRequest;
   thread: Thread;
+  /** The HTTP caller of POST /threads/:id/send; null or absent otherwise. */
+  requester?: BbRequester | null;
 }
 
 export async function acceptThreadSendRequest(
@@ -36,6 +39,7 @@ export async function acceptThreadSendRequest(
     source: { kind: "inline" },
     queuePayload: { kind: "inline" },
     pluginSubmission: args.payload.pluginSubmission ?? null,
+    requester: args.requester ?? null,
     origin: null,
     originPluginId: null,
     startedOnBehalfOf: null,

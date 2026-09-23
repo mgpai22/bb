@@ -398,21 +398,23 @@ export default async function browserAutomationPlugin(bb: BbPluginApi) {
     signal: AbortSignal,
   ) {
     const h = handlers(signal);
+    // CLI calls have no HTTP caller.
+    const cliContext = { experimental_requester: null };
     switch (method) {
       case "open":
-        return h.open(rpcContract.open.input.parse(input));
+        return h.open(rpcContract.open.input.parse(input), cliContext);
       case "list":
-        return h.list(rpcContract.list.input.parse(input));
+        return h.list(rpcContract.list.input.parse(input), cliContext);
       case "run":
-        return h.run(rpcContract.run.input.parse(input));
+        return h.run(rpcContract.run.input.parse(input), cliContext);
       case "pages":
-        return h.pages(rpcContract.pages.input.parse(input));
+        return h.pages(rpcContract.pages.input.parse(input), cliContext);
       case "screenshot":
-        return h.screenshot(rpcContract.screenshot.input.parse(input));
+        return h.screenshot(rpcContract.screenshot.input.parse(input), cliContext);
       case "stop":
-        return h.stop(rpcContract.stop.input.parse(input));
+        return h.stop(rpcContract.stop.input.parse(input), cliContext);
       case "close":
-        return h.close(rpcContract.close.input.parse(input));
+        return h.close(rpcContract.close.input.parse(input), cliContext);
     }
   }
   bb.agents.configure(() => ({ tools: [], skills: ["browser-automation"] }));

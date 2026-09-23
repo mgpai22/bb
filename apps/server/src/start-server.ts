@@ -173,6 +173,21 @@ export async function runServer(serverConfig: ServerConfig): Promise<void> {
   if (serverConfig.BB_SERVER_LAUNCH_ID !== undefined) {
     runtimeConfig.launchId = serverConfig.BB_SERVER_LAUNCH_ID;
   }
+  const accessTeamDomain = serverConfig.BB_ACCESS_TEAM_DOMAIN;
+  const accessAud = serverConfig.BB_ACCESS_AUD;
+  runtimeConfig.requester = {
+    access:
+      accessTeamDomain === undefined || accessAud === undefined
+        ? null
+        : {
+            aud: accessAud,
+            jwksUrl:
+              serverConfig.BB_ACCESS_JWKS_URL ??
+              `https://${accessTeamDomain}/cdn-cgi/access/certs`,
+            teamDomain: accessTeamDomain,
+          },
+    loopbackIdentity: serverConfig.BB_LOOPBACK_IDENTITY ?? null,
+  };
   const terminalSessions = new TerminalSessionLifecycle({
     config: runtimeConfig,
     db,
