@@ -553,6 +553,7 @@ describe("public host management", () => {
         "revokeMachine",
         revokeRecord,
         { machineId: "machine-cloud-remove" },
+        { experimental_requester: null },
       );
     });
   }, 30_000);
