@@ -230,6 +230,7 @@ describe("public project command typeahead route", () => {
       const { host, session } = seedHostSession(harness.deps, {
         id: "host-thread-commands",
       });
+      seedPrimaryHost(harness.deps, host.id);
       const { project } = seedProjectWithSource(harness.deps, {
         hostId: host.id,
         path: "/tmp/thread-commands",
