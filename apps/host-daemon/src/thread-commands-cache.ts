@@ -6,47 +6,64 @@ import {
   hostProviderCommandSchema,
   type HostProviderCommand,
 } from "@bb/host-daemon-contract";
+import type { ThreadCommand } from "@bb/provider-bridge-protocol";
 import { isFsErrorWithCode } from "./fs-errors.js";
 import { requireContainedPath } from "./command-handlers/prompt-attachments.js";
-const ADVERTISED_COMMANDS_FILE_NAME = "advertised-commands.json";
+
+const MAX_CACHE_FILE_BYTES = 256 * 1024;
+const MAX_CACHED_COMMANDS = 200;
 const advertisedThreadCommandsFileSchema = z
   .object({
     commands: z.array(hostProviderCommandSchema),
   })
   .passthrough();
 
-function advertisedCommandsFilePath(
-  threadStorageRootPath: string,
-  threadId: string,
-): string {
-  const threadDir = requireContainedPath(
-    threadStorageRootPath,
-    path.join(threadStorageRootPath, threadId),
-    "Advertised commands path escapes the thread storage root",
-  );
+interface ThreadCommandsCacheArgs {
+  dataDir: string;
+  threadId: string;
+}
+
+function advertisedCommandsFilePath(args: ThreadCommandsCacheArgs): string {
+  const root = path.join(args.dataDir, "thread-commands");
   return requireContainedPath(
-    threadStorageRootPath,
-    path.join(threadDir, ADVERTISED_COMMANDS_FILE_NAME),
-    "Advertised commands path escapes the thread storage root",
+    root,
+    path.join(root, `${args.threadId}.json`),
+    "Advertised commands path escapes the thread commands cache",
   );
 }
 
-export async function readAdvertisedThreadCommands(args: {
-  threadStorageRootPath: string;
-  threadId: string;
-}): Promise<HostProviderCommand[] | null> {
+export function hostThreadCommands(
+  commands: readonly ThreadCommand[],
+): HostProviderCommand[] {
+  return commands.slice(0, MAX_CACHED_COMMANDS).map((command) => ({
+    name: command.name,
+    source: "command",
+    origin: "project",
+    description: command.description,
+    argumentHint: command.argumentHint,
+  }));
+}
+
+export async function readAdvertisedThreadCommands(
+  args: ThreadCommandsCacheArgs,
+): Promise<HostProviderCommand[] | null> {
   let filePath: string;
   try {
-    filePath = advertisedCommandsFilePath(
-      args.threadStorageRootPath,
-      args.threadId,
-    );
+    filePath = advertisedCommandsFilePath(args);
   } catch {
     return null;
   }
   let raw: string;
   try {
-    raw = await fs.readFile(filePath, "utf8");
+    const handle = await fs.open(filePath, "r");
+    try {
+      if ((await handle.stat()).size > MAX_CACHE_FILE_BYTES) {
+        return null;
+      }
+      raw = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
   } catch (error) {
     if (isFsErrorWithCode(error, "ENOENT")) {
       return null;
@@ -63,28 +80,29 @@ export async function readAdvertisedThreadCommands(args: {
   if (!validated.success) {
     return null;
   }
-  return validated.data.commands;
+  return validated.data.commands.slice(0, MAX_CACHED_COMMANDS);
 }
 
-export async function writeAdvertisedThreadCommands(args: {
-  threadStorageRootPath: string;
-  threadId: string;
-  commands: readonly HostProviderCommand[];
-}): Promise<void> {
-  const filePath = advertisedCommandsFilePath(
-    args.threadStorageRootPath,
-    args.threadId,
-  );
+export async function writeAdvertisedThreadCommands(
+  args: ThreadCommandsCacheArgs & { commands: readonly ThreadCommand[] },
+): Promise<void> {
+  const filePath = advertisedCommandsFilePath(args);
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
     await fs.writeFile(
       temporaryPath,
-      JSON.stringify({ commands: [...args.commands] }),
+      JSON.stringify({ commands: hostThreadCommands(args.commands) }),
       "utf8",
     );
     await fs.rename(temporaryPath, filePath);
   } finally {
     await fs.rm(temporaryPath, { force: true });
   }
+}
+
+export async function deleteAdvertisedThreadCommands(
+  args: ThreadCommandsCacheArgs,
+): Promise<void> {
+  await fs.rm(advertisedCommandsFilePath(args), { force: true });
 }

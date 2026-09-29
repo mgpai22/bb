@@ -84,7 +84,6 @@ interface AcpDeltaTranslationContext {
 export interface AcpDeltaTranslatorOptions {
   cwd?: string | undefined;
   dialect?: AcpDialect | undefined;
-  /** Where assistant image chunks are saved; without it they are dropped. */
   imageDir?: string | undefined;
 }
 
@@ -95,7 +94,6 @@ const ACP_IMAGE_EXTENSIONS: Readonly<Record<string, string>> = {
   "image/webp": "webp",
 };
 
-// Content-addressed so a re-sent image reuses its file.
 function saveAcpImage(
   dir: string,
   image: AcpImageContentBlock,
@@ -676,7 +674,12 @@ export function createAcpDeltaTranslator(
                 ...saved,
                 transparentBackground: false,
               },
-              noTurnFallback: noTurnFallbackFor(rawEvent),
+              noTurnFallback: noTurnFallbackFor(
+                updateEnvelope(context, {
+                  ...update,
+                  content: { type: "image", mimeType: image.data.mimeType },
+                }),
+              ),
             },
           ];
         }

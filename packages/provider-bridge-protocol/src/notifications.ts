@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { providerRecoveryHintSchema } from "./errors.js";
+import { threadCommandSchema } from "./requests.js";
 
 export const BRIDGE_NOTIFICATION_METHODS = {
   threadIdentity: "thread/identity",
   sessionReplaced: "session/replaced",
   providerRaw: "provider/raw",
   providerRecovery: "provider/recovery",
+  threadCommands: "thread/commands/updated",
   error: "error",
 } as const;
 
@@ -14,6 +16,13 @@ export const threadIdentityNotificationSchema = z
     threadId: z.string().min(1),
     providerThreadId: z.string().min(1),
     sessionRestorable: z.boolean().optional(),
+  })
+  .passthrough();
+
+export const threadCommandsNotificationSchema = z
+  .object({
+    threadId: z.string().min(1),
+    commands: z.array(threadCommandSchema),
   })
   .passthrough();
 

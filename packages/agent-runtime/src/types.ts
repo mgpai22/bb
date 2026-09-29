@@ -89,6 +89,11 @@ export interface AgentRuntimeOptions {
   onProcessExit?: (info: AgentRuntimeProcessExitInfo) => void;
 
   onProviderRecovery?: (hint: AgentRuntimeProviderRecoveryHint) => void;
+
+  onThreadCommands?: (args: {
+    threadId: string;
+    commands: ThreadCommand[];
+  }) => void;
 }
 
 export interface AgentRuntimeProviderRecoveryHint {

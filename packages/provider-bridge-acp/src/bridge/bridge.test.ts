@@ -1388,6 +1388,19 @@ describe("acp bridge", () => {
     ).not.toContain("session/set_model");
   });
 
+  it("reports the model config option error when the session/set_model fallback also fails", async () => {
+    await expect(
+      startThread({
+        envVars: {
+          FAKE_ACP_MODEL_CONFIG: "1",
+          FAKE_ACP_MODELS_FIELD: "1",
+          FAKE_ACP_SET_CONFIG_MODEL_ERROR: "1",
+        },
+        model: "fake/missing",
+      }),
+    ).rejects.toThrow(/model config probe failed/u);
+  });
+
   it("selects ACP-native models from session models state", async () => {
     const { providerThreadId } = await startThread({
       envVars: { FAKE_ACP_MODELS_FIELD: "1" },
@@ -1432,6 +1445,26 @@ describe("acp bridge", () => {
         reasoningLevel: "max",
       }),
     ).rejects.toThrow(/effort config update failed/u);
+  });
+
+  it("starts the session when the agent rejects a configured native reasoning option it never advertised", async () => {
+    const { providerThreadId } = await startThread({
+      envVars: { FAKE_ACP_MODEL_CONFIG: "1" },
+      model: "fake/strong",
+      reasoningLevel: "max",
+      nativeReasoning: {
+        configId: "reasoning_effort",
+        supportedLevels: ["none", "low", "medium", "high", "xhigh", "max"],
+        defaultLevel: "medium",
+      },
+    });
+
+    sendTurnRequest("turn/start", providerThreadId, {
+      input: [{ type: "text", text: "hello", mentions: [] }],
+    });
+    expect(await waitForTurnCompleted()).toMatchObject({
+      status: "completed",
+    });
   });
 
   it("applies configured native reasoning when the ACP agent does not advertise thought_level", async () => {
@@ -1661,6 +1694,21 @@ describe("acp bridge", () => {
     await waitForTurnCompleted();
 
     expect(agentMessageTexts()).toContain("echo:advertise-commands");
+    expect(notifications("thread/commands/updated").at(-1)?.params).toEqual({
+      threadId: bbThreadId,
+      commands: [
+        {
+          name: "ui-check",
+          description: "Run UI verification checks",
+          argumentHint: "<fixture>",
+        },
+        {
+          name: "jobs",
+          description: "List background jobs",
+          argumentHint: null,
+        },
+      ],
+    });
     expect(await threadCommands(bbThreadId, providerThreadId)).toEqual({
       commands: [
         {

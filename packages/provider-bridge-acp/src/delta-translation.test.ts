@@ -655,6 +655,16 @@ describe("acp delta translation (moved from the legacy adapter suite)", () => {
       expect(readdirSync(imageDir)).toEqual([]);
     });
 
+    it("keeps base64 image data out of the no-turn fallback", () => {
+      const imageDir = mkdtempSync(join(tmpdir(), "acp-images-"));
+      const harness = createHarness({ imageDir });
+
+      const events = harness.translate(ompImageChunk(PNG_1X1, "image/png"));
+
+      expect(JSON.stringify(events)).toContain("image/png");
+      expect(JSON.stringify(events)).not.toContain(PNG_1X1);
+    });
+
     it("keeps suppressing image chunks when no image directory is configured", () => {
       const harness = startedHarness();
       expect(harness.translate(ompImageChunk(PNG_1X1, "image/png"))).toEqual(

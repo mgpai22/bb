@@ -1308,6 +1308,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
       });
       return;
     }
+    const threadCommands = args.proc.adapter.decodeThreadCommands?.(
+      args.parsed,
+    );
+    if (threadCommands !== null && threadCommands !== undefined) {
+      if (args.proc.identity.threadIds.has(threadCommands.threadId)) {
+        options.onThreadCommands?.(threadCommands);
+      }
+      return;
+    }
     emitTranslatedEvents({
       events: args.proc.adapter.translateEvent(args.parsed),
       proc: args.proc,

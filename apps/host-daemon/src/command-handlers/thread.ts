@@ -21,6 +21,7 @@ import {
 } from "./prompt-attachments.js";
 import { providerInstallationGateKey } from "../provider-installation-gate.js";
 import { requireResolvedWorkspaceForCommand } from "../workspace-resolution.js";
+import { deleteAdvertisedThreadCommands } from "../thread-commands-cache.js";
 
 type TurnSubmitCommand = CommandOf<"turn.submit">;
 type ExistingThreadRuntimeCommand =
@@ -61,6 +62,10 @@ export async function deleteThreadStorage(
     "Thread storage path escapes the storage root",
   );
   await fs.rm(storagePath, { recursive: true, force: true });
+  await deleteAdvertisedThreadCommands({
+    dataDir: options.dataDir,
+    threadId: command.threadId,
+  });
 }
 
 type ThreadStartRuntimeCommand =

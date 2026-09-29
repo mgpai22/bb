@@ -622,7 +622,7 @@ async function handlePrompt(message) {
     notifyUpdate({
       sessionUpdate: "available_commands_update",
       availableCommands: [
-        { name: "good", description: "Well formed" },
+        { name: "good", description: "Well formed", input: { hint: 42 } },
         { description: "Missing name" },
         { name: "" },
         { name: "has space" },
@@ -630,7 +630,7 @@ async function handlePrompt(message) {
         {
           name: "/slashy",
           description: "Leading slash",
-          inputHint: "<target>",
+          input: { hint: "<target>" },
         },
       ],
     });
@@ -642,7 +642,7 @@ async function handlePrompt(message) {
         {
           name: "ui-check",
           description: "Run UI verification checks",
-          inputHint: "<fixture>",
+          input: { hint: "<fixture>" },
         },
         { name: "jobs", description: "List background jobs" },
       ],

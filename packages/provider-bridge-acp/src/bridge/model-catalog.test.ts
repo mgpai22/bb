@@ -545,6 +545,22 @@ describe("acp configOptions model catalog", () => {
     ).toBe("low");
   });
 
+  it("keeps none as the default for agents that advertise none first with an unmapped current value", () => {
+    expect(
+      buildAcpNativeReasoningSupport({
+        id: "effort",
+        category: "thought_level",
+        type: "select",
+        currentValue: "auto",
+        options: [
+          { value: "none", name: "None" },
+          { value: "auto", name: "Auto" },
+          { value: "high", name: "High" },
+        ],
+      }).defaultReasoningEffort,
+    ).toBe("none");
+  });
+
   it("falls back to the first model when currentValue is absent or stale", () => {
     expect(
       buildModelCatalogFromConfigOptions({
