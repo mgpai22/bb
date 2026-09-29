@@ -3453,6 +3453,58 @@ describe("acp bridge", () => {
     startedProviderThreadIds.push(result.providerThreadId);
   });
 
+  it("reports the agent's session/load error when a cwd change prevents restore", async () => {
+    const first = await startThread({
+      envVars: { FAKE_ACP_LOAD_SESSION: "1" },
+    });
+    await stopThread(first.providerThreadId);
+    startedProviderThreadIds.pop();
+    const movedDir = mkdtempSync(join(tmpdir(), "bb-acp-moved-"));
+    const stderrWrite = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+
+    try {
+      const resumeId = sendRequest("thread/resume", {
+        threadId: first.bbThreadId,
+        cwd: movedDir,
+        instructionMode: "append",
+        options: executionOptions({
+          providerOptions: {
+            acpLaunchSpec: acpLaunchSpec({
+              envVars: {
+                FAKE_ACP_LOAD_SESSION: "1",
+                FAKE_ACP_LOAD_REQUIRE_CWD: workspaceDir,
+              },
+            }),
+          },
+        }),
+        providerThreadId: first.providerThreadId,
+      });
+      const result = (await waitForResponse(resumeId)).result as
+        | { providerThreadId?: unknown }
+        | undefined;
+      if (typeof result?.providerThreadId !== "string") {
+        throw new Error("thread/resume did not return a providerThreadId");
+      }
+      startedProviderThreadIds.push(result.providerThreadId);
+      expect(result.providerThreadId).not.toBe(first.providerThreadId);
+
+      const agentError = `ACP session load was cancelled: ${first.providerThreadId}`;
+      expect(threadEventsOfType("provider/warning")).toEqual([
+        expect.objectContaining({
+          details: expect.stringContaining(agentError),
+        }),
+      ]);
+      expect(
+        stderrWrite.mock.calls.map(([chunk]) => String(chunk)),
+      ).toContainEqual(expect.stringContaining(agentError));
+    } finally {
+      stderrWrite.mockRestore();
+      rmSync(movedDir, { recursive: true, force: true });
+    }
+  });
+
   it("re-applies ACP-native reasoning after session/load resume", async () => {
     const first = await startThread({
       envVars: {
