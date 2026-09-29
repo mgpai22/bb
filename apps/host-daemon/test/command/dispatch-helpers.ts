@@ -369,6 +369,9 @@ export function createFakeRuntime() {
     async renameThread(args) {
       state.renamedTitle = args.title;
     },
+    async listThreadCommands() {
+      return { commands: [], advertised: false };
+    },
     async archiveThread(args) {
       state.archivedThreadId = args.threadId;
       state.archivedProviderId = args.providerId;

@@ -269,6 +269,9 @@ function createFakeRuntime(): AgentRuntime {
       return { cleared: true };
     },
     async renameThread() {},
+    async listThreadCommands() {
+      return { commands: [], advertised: false };
+    },
     async archiveThread() {},
     async unarchiveThread() {},
     async listModels() {

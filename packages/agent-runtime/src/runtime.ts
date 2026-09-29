@@ -15,6 +15,7 @@ import {
   providerUsageResultSchema,
   ThreadEventGrammar,
   threadIdentityResultSchema,
+  threadCommandsResultSchema,
 } from "@bb/provider-bridge-protocol";
 import {
   JsonRpcResponseError,
@@ -2326,6 +2327,32 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
               threadId,
             },
           });
+        },
+      });
+    },
+
+    async listThreadCommands({ threadId }) {
+      return runThreadOperation({
+        threadId,
+        work: async () => {
+          try {
+            const proc = requireProviderProcessForThread(threadId);
+            const plan = proc.adapter.buildCommandPlan({
+              type: "thread/commands",
+              threadId,
+              providerThreadId: requireProviderThreadId(threadId),
+            });
+            if (plan.kind === "noop") {
+              return { commands: [], advertised: false };
+            }
+            return await sendCommand({
+              proc,
+              message: plan,
+              resultSchema: threadCommandsResultSchema,
+            });
+          } catch {
+            return { commands: [], advertised: false };
+          }
         },
       });
     },
