@@ -211,13 +211,24 @@ interface AcpOpenToolCall {
   openedType: DeltaItemShape["type"];
   permissionTitle?: string;
   delegation?: AcpDelegationReport;
-  pendingJobIds?: Set<string>;
-  settledJobs?: AcpJobReport[];
+  asyncJobs?: AcpJobReport[];
   buffered?: boolean;
 }
 
-const ASYNC_TURN_END_SUMMARY =
-  "Still running when the turn ended; the agent receives its result later.";
+const ITEM_STATUS_SEVERITY: Readonly<Record<ThreadEventItemStatus, number>> = {
+  pending: 0,
+  completed: 1,
+  interrupted: 2,
+  failed: 3,
+};
+
+const UNSETTLED_JOB_NOTE: Readonly<Record<ThreadEventItemStatus, string>> = {
+  pending: "still running",
+  completed:
+    "still running when the turn ended; the agent receives the result later.",
+  interrupted: "still running when the turn was interrupted.",
+  failed: "still running when the turn failed.",
+};
 
 export function createAcpDeltaTranslator(
   options: AcpDeltaTranslatorOptions = {},
@@ -226,6 +237,7 @@ export function createAcpDeltaTranslator(
   const imageDir = options.imageDir;
   const pathOptions = { cwd: options.cwd };
   const mergedToolCalls = new Map<string, AcpOpenToolCall>();
+  const deliveredJobIdsByThread = new Map<string, Set<string>>();
 
   let injectedToolsByName = new Map<string, AcpInjectedTool>();
   const injectedToolBindings = new Map<string, AcpInjectedTool>();
@@ -276,6 +288,7 @@ export function createAcpDeltaTranslator(
       injectedToolBindings.delete(key);
     }
     pendingInjectedCalls.delete(context?.threadId ?? "");
+    deliveredJobIdsByThread.delete(context?.threadId ?? "");
   }
 
   function configureInjectedTools(tools: readonly AcpInjectedTool[]): void {
@@ -595,56 +608,113 @@ export function createAcpDeltaTranslator(
     };
   }
 
-  function settleAsyncJobs(
+  function deliveredJobIds(
+    context: AcpDeltaTranslationContext | undefined,
+  ): Set<string> {
+    const threadId = context?.threadId ?? "";
+    const existing = deliveredJobIdsByThread.get(threadId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const created = new Set<string>();
+    deliveredJobIdsByThread.set(threadId, created);
+    return created;
+  }
+
+  function asyncDelegationClose(
+    context: AcpDeltaTranslationContext | undefined,
+    open: AcpOpenToolCall,
+    jobs: readonly AcpJobReport[],
+    turnStatus: ThreadEventItemStatus,
+  ): ThreadDelta {
+    const running = jobs.filter((job) => job.status === "running");
+    const statuses: ThreadEventItemStatus[] = [
+      ...jobs.flatMap((job) => (job.status === "running" ? [] : [job.status])),
+      ...(running.length === 0
+        ? []
+        : [turnStatus === "completed" ? "interrupted" : turnStatus]),
+    ];
+    const lines = jobs.flatMap((job) =>
+      job.status === "running"
+        ? []
+        : jobs.length === 1
+          ? job.summary === undefined
+            ? []
+            : [job.summary]
+          : [`${job.id}: ${job.summary ?? job.status}`],
+    );
+    if (running.length > 0) {
+      lines.push(
+        `${running.map((job) => job.id).join(", ")} ${running.length === 1 ? "was" : "were"} ${UNSETTLED_JOB_NOTE[turnStatus]}`,
+      );
+    }
+    return toolCallClose({
+      context,
+      event: open.event,
+      status: statuses.reduce((worst, status) =>
+        ITEM_STATUS_SEVERITY[status] > ITEM_STATUS_SEVERITY[worst]
+          ? status
+          : worst,
+      ),
+      permissionTitle: open.permissionTitle,
+      delegation: open.delegation,
+      summary: lines.length === 0 ? undefined : lines.join("\n\n"),
+    });
+  }
+
+  function applyJobReports(
     context: AcpDeltaTranslationContext | undefined,
     reports: readonly AcpJobReport[],
+    source: "progress" | "wait",
   ): { deltas: ThreadDelta[]; attributed: boolean } {
     const deltas: ThreadDelta[] = [];
+    const delivered = deliveredJobIds(context);
     let attributed = reports.length > 0;
+    let informative = false;
     for (const report of reports) {
-      const entry = threadCallEntries(context).find(([, open]) =>
-        open.pendingJobIds?.has(report.id),
-      );
-      if (entry === undefined) {
+      if (!report.task) {
         attributed = false;
         continue;
       }
-      const [key, open] = entry;
-      if (report.status === "running") {
+      const entry = threadCallEntries(context).find(([, open]) =>
+        open.asyncJobs?.some((job) => job.id === report.id),
+      );
+      if (entry === undefined) {
+        if (source === "wait" && delivered.delete(report.id)) {
+          informative = true;
+        } else {
+          attributed = false;
+        }
         continue;
       }
-      const pendingJobIds = new Set(open.pendingJobIds);
-      pendingJobIds.delete(report.id);
-      const settledJobs = [...(open.settledJobs ?? []), report];
-      if (pendingJobIds.size > 0) {
-        mergedToolCalls.set(key, { ...open, pendingJobIds, settledJobs });
+      const [key, open] = entry;
+      const jobs = open.asyncJobs ?? [];
+      const current = jobs.find((job) => job.id === report.id);
+      if (report.status === "running" || current === undefined) {
+        continue;
+      }
+      informative = true;
+      if (current.status !== "running" && source === "progress") {
+        continue;
+      }
+      if (source === "progress") {
+        delivered.add(report.id);
+      } else {
+        delivered.delete(report.id);
+      }
+      const updated =
+        current.status === "running"
+          ? report
+          : { ...current, summary: report.summary ?? current.summary };
+      const nextJobs = jobs.map((job) => (job === current ? updated : job));
+      if (nextJobs.some((job) => job.status === "running")) {
+        mergedToolCalls.set(key, { ...open, asyncJobs: nextJobs });
         continue;
       }
       mergedToolCalls.delete(key);
-      const summaries = settledJobs.flatMap((job) =>
-        job.summary === undefined ? [] : [{ id: job.id, text: job.summary }],
-      );
-      deltas.push(
-        toolCallClose({
-          context,
-          event: open.event,
-          status: settledJobs.some((job) => job.status === "failed")
-            ? "failed"
-            : "completed",
-          permissionTitle: open.permissionTitle,
-          delegation: open.delegation,
-          summary:
-            settledJobs.length === 1
-              ? summaries[0]?.text
-              : summaries.length === 0
-                ? undefined
-                : summaries
-                    .map((summary) => `${summary.id}: ${summary.text}`)
-                    .join("\n\n"),
-        }),
-      );
+      deltas.push(asyncDelegationClose(context, open, nextJobs, "completed"));
     }
-    return { deltas, attributed };
+    return { deltas, attributed: attributed && informative };
   }
 
   function finishedToolCallCloses(
@@ -654,10 +724,46 @@ export function createAcpDeltaTranslator(
     if (reports === undefined) {
       return [toolCallClose(args)];
     }
-    const settled = settleAsyncJobs(args.context, reports);
+    const settled = applyJobReports(args.context, reports, "wait");
     return args.buffered && settled.attributed
       ? settled.deltas
       : [...settled.deltas, toolCallClose(args)];
+  }
+
+  function releaseBufferedCall(
+    context: AcpDeltaTranslationContext | undefined,
+    key: string,
+  ): ThreadDelta[] {
+    const open = mergedToolCalls.get(key);
+    if (open?.buffered !== true) {
+      return [];
+    }
+    mergedToolCalls.set(key, { ...open, buffered: false });
+    const classified = classifyCall(context, open.event);
+    return [
+      {
+        kind: "item.open",
+        key: { providerItemId: open.event.toolCallId },
+        item: classified.item,
+        presentation: classified.presentation,
+      },
+    ];
+  }
+
+  function turnEndClose(
+    context: AcpDeltaTranslationContext | undefined,
+    open: AcpOpenToolCall,
+    status: ThreadEventItemStatus,
+  ): ThreadDelta {
+    return open.asyncJobs === undefined
+      ? toolCallClose({
+          context,
+          event: open.event,
+          status,
+          permissionTitle: open.permissionTitle,
+          delegation: open.delegation,
+        })
+      : asyncDelegationClose(context, open, open.asyncJobs, status);
   }
 
   function commandCloseFields(
@@ -694,19 +800,7 @@ export function createAcpDeltaTranslator(
     const deltas: ThreadDelta[] = [];
     for (const [key, open] of threadCallEntries(context)) {
       mergedToolCalls.delete(key);
-      deltas.push(
-        toolCallClose({
-          context,
-          event: open.event,
-          status,
-          permissionTitle: open.permissionTitle,
-          delegation: open.delegation,
-          summary:
-            open.pendingJobIds === undefined
-              ? undefined
-              : ASYNC_TURN_END_SUMMARY,
-        }),
-      );
+      deltas.push(turnEndClose(context, open, status));
     }
     return deltas;
   }
@@ -820,11 +914,17 @@ export function createAcpDeltaTranslator(
           ];
         }
         const classified = classifyCall(context, event);
+        // ponytail: OMP sends no tool name, so any kind-other call with only
+        // `{i}` input is held back while async jobs are open. Its row appears
+        // late: on a non-wait progress frame, a permission request, completion,
+        // or turn end. Upgrade path: an OMP tool name on the ACP frame.
         const buffered =
           dialect.asyncJobs?.isWaitCandidate(event) === true &&
-          threadCallEntries(context).some(
-            ([, open]) => open.pendingJobIds !== undefined,
-          );
+          (threadCallEntries(context).some(
+            ([, open]) => open.asyncJobs !== undefined,
+          ) ||
+            (deliveredJobIdsByThread.get(context?.threadId ?? "")?.size ?? 0) >
+              0);
         mergedToolCalls.set(announcedKey, {
           event,
           openedType: classified.item.type,
@@ -860,20 +960,19 @@ export function createAcpDeltaTranslator(
           open?.clientFileWrites ?? [],
         );
         if (isTerminalAcpStatus(merged.status)) {
-          const jobIds =
+          const jobs =
             merged.status === "completed"
-              ? dialect.asyncJobs?.spawnedJobIds(merged)
+              ? dialect.asyncJobs?.taskJobs(merged)
               : undefined;
           if (
-            jobIds !== undefined &&
+            jobs?.some((job) => job.status === "running") === true &&
             classifyCall(context, merged).item.type === "delegation"
           ) {
             mergedToolCalls.set(key, {
               ...open,
               event: merged,
               openedType: open?.openedType ?? "delegation",
-              pendingJobIds: new Set(jobIds),
-              settledJobs: [],
+              asyncJobs: jobs,
             });
             return [];
           }
@@ -895,7 +994,36 @@ export function createAcpDeltaTranslator(
           openedType: open?.openedType ?? mergedType,
         });
         if (open?.buffered === true) {
-          return [];
+          if (
+            event.rawOutput === undefined ||
+            dialect.asyncJobs?.waitReport(event) !== undefined
+          ) {
+            return [];
+          }
+          const bufferedProgress = extractAcpToolCallOutputText(event);
+          return [
+            ...releaseBufferedCall(context, key),
+            ...(bufferedProgress === undefined
+              ? []
+              : [
+                  {
+                    kind: "item.progress" as const,
+                    key: { providerItemId: event.toolCallId },
+                    message: bufferedProgress,
+                    noTurnFallback: noTurnFallbackFor(rawEvent),
+                  },
+                ]),
+          ];
+        }
+        if (open?.asyncJobs !== undefined) {
+          const settled = applyJobReports(
+            context,
+            dialect.asyncJobs?.taskJobs(merged) ?? [],
+            "progress",
+          );
+          if (!mergedToolCalls.has(key)) {
+            return settled.deltas;
+          }
         }
         if (
           event.status === "in_progress" &&
@@ -1024,14 +1152,14 @@ export function createAcpDeltaTranslator(
   ): ThreadDelta[] {
     const errorEnvelope = errorEnvelopeSchema.safeParse(event);
     if (errorEnvelope.success) {
-      const bufferedCloses = threadCallEntries(context).flatMap(([, open]) =>
-        open.buffered === true
-          ? [toolCallClose({ context, event: open.event, status: "failed" })]
+      const asyncCloses = threadCallEntries(context).flatMap(([, open]) =>
+        open.buffered === true || open.asyncJobs !== undefined
+          ? [turnEndClose(context, open, "failed")]
           : [],
       );
       clearThreadCalls(context);
       return [
-        ...bufferedCloses,
+        ...asyncCloses,
         {
           kind: "provider.error",
           message: "Provider error",
@@ -1307,6 +1435,8 @@ export function createAcpDeltaTranslator(
     noteDelegationReport,
     noteInjectedToolCall,
     notePermissionToolCall,
+    releaseBufferedToolCall: (threadId: string, toolCallId: string) =>
+      releaseBufferedCall({ threadId }, callKey({ threadId }, toolCallId)),
     translateAcpEvent,
   };
 }

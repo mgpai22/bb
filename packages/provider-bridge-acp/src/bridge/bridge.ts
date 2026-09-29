@@ -1497,6 +1497,15 @@ function handlePermissionRequest(
   }
 
   const toolCall = parsed.data.toolCall;
+  if (toolCall?.toolCallId !== undefined) {
+    sendThreadDeltas(
+      session.bbThreadId,
+      session.translator.releaseBufferedToolCall(
+        session.bbThreadId,
+        toolCall.toolCallId,
+      ),
+    );
+  }
   const bound =
     toolCall?.toolCallId !== undefined
       ? session.translator.notePermissionToolCall(session.bbThreadId, {

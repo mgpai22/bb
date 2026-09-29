@@ -36,12 +36,13 @@ type AcpCompactionOutcome =
 
 export interface AcpJobReport {
   id: string;
-  status: "running" | "completed" | "failed";
+  task: boolean;
+  status: "running" | "completed" | "failed" | "interrupted";
   summary?: string;
 }
 
 interface AcpAsyncJobsDialect {
-  spawnedJobIds(event: AcpToolCallUpdateEvent): string[] | undefined;
+  taskJobs(event: AcpToolCallUpdateEvent): AcpJobReport[] | undefined;
   waitReport(event: AcpToolCallUpdateEvent): AcpJobReport[] | undefined;
   isWaitCandidate(event: AcpToolCallUpdateEvent): boolean;
 }
@@ -450,28 +451,100 @@ function ompClassifyToolCall(
   };
 }
 
+const OMP_TASK_OUTPUT_PATTERN = /<output>\n?([\s\S]*?)\n?<\/output>/;
+
+function ompJobSummary(text: string | undefined): string | undefined {
+  if (text === undefined) {
+    return undefined;
+  }
+  const summary = (OMP_TASK_OUTPUT_PATTERN.exec(text)?.[1] ?? text).trim();
+  return summary.length === 0 ? undefined : summary;
+}
+
 const ompAsyncTaskOutputSchema = z
   .object({
     details: z
       .object({
         progress: z.array(
-          z.object({ id: z.string(), status: z.string() }).passthrough(),
+          z
+            .object({
+              id: z.string(),
+              status: z.string(),
+              extractedToolData: z
+                .object({
+                  yield: z
+                    .array(
+                      z
+                        .object({
+                          data: z.unknown().optional(),
+                          error: z.string().optional(),
+                        })
+                        .passthrough(),
+                    )
+                    .optional(),
+                })
+                .passthrough()
+                .optional(),
+            })
+            .passthrough(),
         ),
-        async: z.object({ state: z.literal("running") }).passthrough(),
+        results: z
+          .array(
+            z
+              .object({
+                id: z.string(),
+                output: z.string().optional(),
+                error: z.string().optional(),
+              })
+              .passthrough(),
+          )
+          .optional(),
+        async: z.object({}).passthrough(),
       })
       .passthrough(),
   })
   .passthrough();
 
-function ompSpawnedJobIds(event: AcpToolCallUpdateEvent): string[] | undefined {
+const OMP_PROGRESS_STATUS: Readonly<Record<string, AcpJobReport["status"]>> = {
+  completed: "completed",
+  failed: "failed",
+  aborted: "interrupted",
+};
+
+function ompTaskJobs(
+  event: AcpToolCallUpdateEvent,
+): AcpJobReport[] | undefined {
   const parsed = ompAsyncTaskOutputSchema.safeParse(event.rawOutput);
   if (!parsed.success) {
     return undefined;
   }
-  const ids = parsed.data.details.progress
-    .filter((entry) => entry.status === "pending" || entry.status === "running")
-    .map((entry) => entry.id);
-  return ids.length === 0 ? undefined : ids;
+  const { progress, results } = parsed.data.details;
+  return progress.map((entry) => {
+    const status = OMP_PROGRESS_STATUS[entry.status] ?? "running";
+    const result = results?.find((candidate) => candidate.id === entry.id);
+    const yielded = entry.extractedToolData?.yield?.at(-1);
+    const yieldedText =
+      yielded?.error ??
+      (typeof yielded?.data === "string"
+        ? yielded.data
+        : yielded?.data === undefined
+          ? undefined
+          : JSON.stringify(yielded.data));
+    const summary =
+      status === "running"
+        ? undefined
+        : ompJobSummary(
+            (status === "completed"
+              ? result?.output
+              : (result?.error ?? result?.output)) ?? yieldedText,
+          );
+    return {
+      id: entry.id,
+      task: true,
+      status,
+      ...(summary === undefined ? {} : { summary }),
+    };
+  });
 }
 
 const ompWaitOutputSchema = z
@@ -483,6 +556,7 @@ const ompWaitOutputSchema = z
           z
             .object({
               id: z.string(),
+              type: z.string().optional(),
               status: z.enum(["running", "completed", "failed", "cancelled"]),
               agentUrlId: z.string().optional(),
               resultText: z.string().optional(),
@@ -495,16 +569,6 @@ const ompWaitOutputSchema = z
   })
   .passthrough();
 
-const OMP_TASK_OUTPUT_PATTERN = /<output>\n?([\s\S]*?)\n?<\/output>/;
-
-function ompJobSummary(text: string | undefined): string | undefined {
-  if (text === undefined) {
-    return undefined;
-  }
-  const summary = (OMP_TASK_OUTPUT_PATTERN.exec(text)?.[1] ?? text).trim();
-  return summary.length === 0 ? undefined : summary;
-}
-
 function ompWaitReport(
   event: AcpToolCallUpdateEvent,
 ): AcpJobReport[] | undefined {
@@ -513,16 +577,15 @@ function ompWaitReport(
     return undefined;
   }
   return parsed.data.details.jobs.map((job) => {
+    const task = job.type === "task";
     const summary =
       job.status === "completed"
         ? ompJobSummary(job.resultText)
         : (ompJobSummary(job.errorText) ?? ompJobSummary(job.resultText));
     return {
-      id: job.agentUrlId ?? job.id,
-      status:
-        job.status === "running" || job.status === "completed"
-          ? job.status
-          : "failed",
+      id: task ? (job.agentUrlId ?? job.id) : job.id,
+      task,
+      status: job.status === "cancelled" ? "interrupted" : job.status,
       ...(summary === undefined ? {} : { summary }),
     };
   });
@@ -535,7 +598,7 @@ export const OMP_ACP_DIALECT: AcpDialect = {
   commandResult: ompCommandResult,
   classifyToolCall: ompClassifyToolCall,
   asyncJobs: {
-    spawnedJobIds: ompSpawnedJobIds,
+    taskJobs: ompTaskJobs,
     waitReport: ompWaitReport,
     isWaitCandidate: (event) =>
       event.kind === "other" &&
