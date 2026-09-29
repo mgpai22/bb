@@ -1,5 +1,13 @@
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { threadScope, turnScope, type ThreadEvent } from "@bb/domain";
+import {
+  PROMPT_ATTACHMENT_MAX_BYTES,
+  threadScope,
+  turnScope,
+  type ThreadEvent,
+} from "@bb/domain";
 import type { ProviderRuntimeEvent } from "@bb/provider-bridge-protocol/bridge-kit";
 import { createDeltaAssembler } from "@bb/provider-bridge-protocol/assembler";
 import type { DeltaAssembler } from "@bb/provider-bridge-protocol/assembler";
@@ -34,8 +42,10 @@ interface AcpEquivalenceHarness {
 
 const SESSION_CWD = "/workspace";
 
-function createHarness(): AcpEquivalenceHarness {
-  const translator = createAcpDeltaTranslator({ cwd: SESSION_CWD });
+function createHarness(
+  options: { imageDir?: string } = {},
+): AcpEquivalenceHarness {
+  const translator = createAcpDeltaTranslator({ cwd: SESSION_CWD, ...options });
   const assembler = createDeltaAssembler({
     providerId: "acp",
     entropyPrefix: ENTROPY,
@@ -558,6 +568,97 @@ describe("acp delta translation (moved from the legacy adapter suite)", () => {
         updateEvent({ sessionUpdate: "usage_update", used: 1, size: "200000" }),
       ),
     ).toEqual([]);
+  });
+
+  describe("assistant image chunks", () => {
+    const PNG_1X1 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+    function ompImageChunk(data: string, mimeType: string) {
+      return updateEvent({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data, mimeType },
+        messageId: "0b6e1d2a-3c4f-4e5a-9b7c-8d9e0f1a2b3c",
+      });
+    }
+
+    it("saves an omp image chunk to disk and completes an image item between text", () => {
+      const imageDir = mkdtempSync(join(tmpdir(), "acp-images-"));
+      const harness = createHarness({ imageDir });
+      harness.translate(turnStartedEvent());
+      harness.translate(
+        updateEvent({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Here it is:" },
+        }),
+      );
+
+      const events = harness.translate(ompImageChunk(PNG_1X1, "image/png"));
+      const items = completedItems(events);
+      expect(items).toEqual([
+        expect.objectContaining({ type: "agentMessage", text: "Here it is:" }),
+        expect.objectContaining({
+          type: "imageGeneration",
+          status: "completed",
+          prompt: null,
+          path: expect.stringMatching(/\.png$/),
+          error: null,
+          transparentBackground: false,
+        }),
+      ]);
+      const path = items[1]?.type === "imageGeneration" ? items[1].path : null;
+      expect(path?.startsWith(`${imageDir}/`)).toBe(true);
+      expect(readFileSync(path ?? "")).toEqual(Buffer.from(PNG_1X1, "base64"));
+
+      const after = harness.translate(
+        updateEvent({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Done." },
+        }),
+      );
+      expect(after.map((event) => event.type)).toEqual([
+        "item/started",
+        "item/agentMessage/delta",
+      ]);
+    });
+
+    it("reports an oversized or unsupported image instead of writing it", () => {
+      const imageDir = mkdtempSync(join(tmpdir(), "acp-images-"));
+      const harness = createHarness({ imageDir });
+      harness.translate(turnStartedEvent());
+      const oversized = "A".repeat(
+        Math.ceil((PROMPT_ATTACHMENT_MAX_BYTES + 3) / 3) * 4,
+      );
+
+      expect(
+        completedItems(harness.translate(ompImageChunk(oversized, "image/png"))),
+      ).toEqual([
+        expect.objectContaining({
+          type: "imageGeneration",
+          path: null,
+          error: `Image exceeds the ${PROMPT_ATTACHMENT_MAX_BYTES} byte limit`,
+        }),
+      ]);
+      expect(
+        completedItems(
+          harness.translate(ompImageChunk(PNG_1X1, "image/svg+xml")),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "imageGeneration",
+          path: null,
+          error: "Unsupported image type image/svg+xml",
+        }),
+      ]);
+      expect(readdirSync(imageDir)).toEqual([]);
+    });
+
+    it("keeps suppressing image chunks when no image directory is configured", () => {
+      const harness = startedHarness();
+      expect(harness.translate(ompImageChunk(PNG_1X1, "image/png"))).toEqual(
+        [],
+      );
+    });
   });
 
   it("accumulates thought chunks into a reasoning item", () => {
@@ -2536,6 +2637,111 @@ describe("acp delta translation (dialects)", () => {
         presentation: { icon: { glyph: "UserRound" } },
       },
     });
+  });
+
+  function ompTaskCall(rawInput: Record<string, unknown>, title = "task") {
+    return updateEvent({
+      sessionUpdate: "tool_call",
+      toolCallId: "toolu_omp_task",
+      title,
+      kind: "other",
+      status: "pending",
+      rawInput,
+    });
+  }
+
+  it("opens and settles an omp task call as a delegation", () => {
+    const harness = dialectHarness("omp");
+    const opened = harness.translate(
+      ompTaskCall(
+        {
+          agent: "explore",
+          task: "Map the retry code path in src/net.",
+          solutionSpace: "read-only survey",
+        },
+        "Mapping retry path",
+      ),
+    );
+    expect(opened[0]).toMatchObject({
+      type: "item/started",
+      item: {
+        type: "delegation",
+        childRef: "toolu_omp_task",
+        label: "Mapping retry path",
+        background: false,
+        presentation: { icon: { glyph: "UserRound" }, detail: "explore" },
+      },
+    });
+
+    harness.translate(
+      updateEvent({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "toolu_omp_task",
+        status: "in_progress",
+        rawOutput: {
+          content: [{ type: "text", text: "1 agent running" }],
+          details: {
+            results: [],
+            totalDurationMs: 10,
+            progress: [{ id: "0-Explore", agent: "explore", status: "running" }],
+          },
+        },
+      }),
+    );
+    expect(
+      completedItems(
+        harness.translate(
+          updateEvent({
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_omp_task",
+            status: "completed",
+            rawOutput: {
+              content: [{ type: "text", text: "Retry lives in src/net/retry.ts" }],
+              details: {
+                results: [{ id: "0-Explore", agent: "explore", exitCode: 0 }],
+                totalDurationMs: 4200,
+              },
+            },
+          }),
+        ),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        id: opened[0]?.type === "item/started" ? opened[0].item.id : "",
+        type: "delegation",
+        status: "completed",
+        label: "Mapping retry path",
+      }),
+    ]);
+  });
+
+  it("labels an omp batch task call and falls back when the title is the tool name", () => {
+    expect(
+      dialectHarness("omp").translate(
+        ompTaskCall({
+          context: "Shared goal",
+          tasks: [
+            { agent: "task", task: "Fix A", solutionSpace: "one fix" },
+            { task: "Fix B", solutionSpace: "one fix" },
+          ],
+        }),
+      )[0],
+    ).toMatchObject({
+      type: "item/started",
+      item: {
+        type: "delegation",
+        label: "Subagent tasks",
+        presentation: { detail: "2 tasks" },
+      },
+    });
+  });
+
+  it("keeps other omp tools generic", () => {
+    expect(
+      dialectHarness("omp").translate(
+        ompTaskCall({ ids: ["0-Explore"] }, "wait"),
+      )[0],
+    ).toMatchObject({ type: "item/started", item: { type: "toolCall" } });
   });
 
   it("keeps a bb-injected tool binding ahead of the dialect", () => {

@@ -1,4 +1,7 @@
-import { providerRawEventSchema } from "@bb/domain";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { PROMPT_ATTACHMENT_MAX_BYTES, providerRawEventSchema } from "@bb/domain";
 import type { ProviderRawEvent } from "@bb/domain";
 import {
   COMPACTION_PRESENTATION,
@@ -58,11 +61,13 @@ import { resolveAcpToolCallPath } from "./tool-call-operation.js";
 import { acpVisibilityMetadata } from "./visibility.js";
 import {
   acpAgentMessageChunkUpdateSchema,
+  acpImageContentBlockSchema,
   acpAgentThoughtChunkUpdateSchema,
   acpPlanUpdateSchema,
   acpToolCallUpdateEventSchema,
   acpUsageUpdateSchema,
   extractAcpContentText,
+  type AcpImageContentBlock,
   type AcpSessionUpdate,
   type AcpStopReason,
   type AcpToolCallContent,
@@ -76,6 +81,47 @@ interface AcpDeltaTranslationContext {
 export interface AcpDeltaTranslatorOptions {
   cwd?: string | undefined;
   dialect?: AcpDialect | undefined;
+  /** Where assistant image chunks are saved; without it they are dropped. */
+  imageDir?: string | undefined;
+}
+
+const ACP_IMAGE_EXTENSIONS: Readonly<Record<string, string>> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
+// Content-addressed so a re-sent image reuses its file.
+function saveAcpImage(
+  dir: string,
+  image: AcpImageContentBlock,
+): { path: string; error: null } | { path: null; error: string } {
+  const extension = ACP_IMAGE_EXTENSIONS[image.mimeType];
+  if (extension === undefined) {
+    return { path: null, error: `Unsupported image type ${image.mimeType}` };
+  }
+  if (Buffer.byteLength(image.data, "base64") > PROMPT_ATTACHMENT_MAX_BYTES) {
+    return {
+      path: null,
+      error: `Image exceeds the ${PROMPT_ATTACHMENT_MAX_BYTES} byte limit`,
+    };
+  }
+  const bytes = Buffer.from(image.data, "base64");
+  const path = join(
+    dir,
+    `${createHash("sha256").update(bytes).digest("hex")}.${extension}`,
+  );
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, bytes);
+  } catch (error) {
+    return {
+      path: null,
+      error: `Could not save image: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  return { path, error: null };
 }
 
 export interface AcpPermissionToolCallInput {
@@ -169,6 +215,7 @@ export function createAcpDeltaTranslator(
   options: AcpDeltaTranslatorOptions = {},
 ) {
   const dialect = options.dialect ?? GENERIC_ACP_DIALECT;
+  const imageDir = options.imageDir;
   const pathOptions = { cwd: options.cwd };
   const mergedToolCalls = new Map<string, AcpOpenToolCall>();
 
@@ -606,7 +653,29 @@ export function createAcpDeltaTranslator(
           ? extractAcpContentText(parsed.data.content)
           : undefined;
         if (text === undefined) {
-          return suppressedUnhandled(rawEvent);
+          const image = parsed.success
+            ? acpImageContentBlockSchema.safeParse(parsed.data.content)
+            : undefined;
+          if (imageDir === undefined || image?.success !== true) {
+            return suppressedUnhandled(rawEvent);
+          }
+          const saved = saveAcpImage(imageDir, image.data);
+          return [
+            closeThoughtStream(),
+            closeAssistantStream(),
+            {
+              kind: "item.close",
+              key: { providerItemId: randomUUID() },
+              status: saved.error === null ? "completed" : "failed",
+              item: {
+                type: "imageGeneration",
+                prompt: null,
+                ...saved,
+                transparentBackground: false,
+              },
+              noTurnFallback: noTurnFallbackFor(rawEvent),
+            },
+          ];
         }
         return [
           closeThoughtStream(),
