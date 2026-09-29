@@ -68,6 +68,7 @@ export function acpProviderDeclaration(
       ...(agent.parameterizedModelPicker === true
         ? { parameterizedModelPicker: true }
         : {}),
+      ...(agent.elicitation === true ? { elicitation: true } : {}),
       ...(agent.primaryModels === undefined
         ? {}
         : { primaryModels: [...agent.primaryModels] }),
@@ -90,6 +91,9 @@ export function acpProviderDeclaration(
       ...ACP_BASE_CAPABILITIES,
       fork: agent.fork ?? DEFAULT_FORK,
       permissionModes: [...ACP_BASE_CAPABILITIES.permissionModes],
+      ...(agent.elicitation === true
+        ? { supportsNativeUserQuestion: true }
+        : {}),
       ...(agent.supportsManualCompaction === true
         ? { supportsManualCompaction: true }
         : {}),

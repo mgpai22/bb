@@ -121,6 +121,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     visibility: "installed",
     supportsManualCompaction: true,
     fork: "tip",
+    elicitation: true,
     launch: {
       displayName: "omp",
       command: "omp",

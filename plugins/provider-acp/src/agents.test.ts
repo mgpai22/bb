@@ -313,6 +313,19 @@ describe("acpProviderDeclaration", () => {
     );
   });
 
+  it("opts only omp into elicitation and its native user questions", () => {
+    const optedIn = KNOWN_ACP_AGENTS.filter((agent) => {
+      const declaration = acpProviderDeclaration(agent);
+      const bridgeOption =
+        declaration.experimental_bridgeOptions?.["elicitation"] === true;
+      expect(declaration.capabilities.supportsNativeUserQuestion).toBe(
+        bridgeOption,
+      );
+      return bridgeOption;
+    }).map((agent) => agent.id);
+    expect(optedIn).toEqual(["acp-omp"]);
+  });
+
   it("keeps each agent's own reasoning ladder and installed-only visibility", () => {
     const grok = acpProviderDeclaration(
       KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-grok")!,

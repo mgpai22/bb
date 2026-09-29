@@ -371,10 +371,12 @@ export function createAcpAgentConnection(
 function acpClientCapabilities(
   parameterizedModelPicker: boolean,
   fsAccess: boolean,
+  elicitation: boolean,
 ) {
   return {
     fs: { readTextFile: fsAccess, writeTextFile: fsAccess },
     terminal: false,
+    ...(elicitation ? { elicitation: { form: {} } } : {}),
     ...(parameterizedModelPicker === true
       ? { _meta: { parameterizedModelPicker: true } }
       : {}),
@@ -386,7 +388,12 @@ export function requestAcpInitialize(
   {
     parameterizedModelPicker,
     fsAccess,
-  }: { parameterizedModelPicker: boolean; fsAccess: boolean },
+    elicitation,
+  }: {
+    parameterizedModelPicker: boolean;
+    fsAccess: boolean;
+    elicitation: boolean;
+  },
 ) {
   return connection.request({
     method: "initialize",
@@ -396,6 +403,7 @@ export function requestAcpInitialize(
       clientCapabilities: acpClientCapabilities(
         parameterizedModelPicker,
         fsAccess,
+        elicitation,
       ),
     },
     resultSchema: acpInitializeResultSchema,
