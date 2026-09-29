@@ -12,6 +12,11 @@ import { requireContainedPath } from "./command-handlers/prompt-attachments.js";
 
 const MAX_CACHE_FILE_BYTES = 256 * 1024;
 const MAX_CACHED_COMMANDS = 200;
+// Bound each entry so 200 of them fit under MAX_CACHE_FILE_BYTES even at three
+// UTF-8 bytes per character. The serialized size check at write time covers
+// the remaining case, very long names.
+const MAX_DESCRIPTION_CHARS = 256;
+const MAX_ARGUMENT_HINT_CHARS = 64;
 const advertisedThreadCommandsFileSchema = z
   .object({
     commands: z.array(hostProviderCommandSchema),
@@ -39,8 +44,9 @@ export function hostThreadCommands(
     name: command.name,
     source: "command",
     origin: "project",
-    description: command.description,
-    argumentHint: command.argumentHint,
+    description: command.description?.slice(0, MAX_DESCRIPTION_CHARS) ?? null,
+    argumentHint:
+      command.argumentHint?.slice(0, MAX_ARGUMENT_HINT_CHARS) ?? null,
   }));
 }
 
@@ -87,14 +93,18 @@ export async function writeAdvertisedThreadCommands(
   args: ThreadCommandsCacheArgs & { commands: readonly ThreadCommand[] },
 ): Promise<void> {
   const filePath = advertisedCommandsFilePath(args);
+  const contents = JSON.stringify({
+    commands: hostThreadCommands(args.commands),
+  });
+  if (Buffer.byteLength(contents, "utf8") > MAX_CACHE_FILE_BYTES) {
+    throw new Error(
+      `Advertised commands exceed the ${MAX_CACHE_FILE_BYTES}-byte cache limit`,
+    );
+  }
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    await fs.writeFile(
-      temporaryPath,
-      JSON.stringify({ commands: hostThreadCommands(args.commands) }),
-      "utf8",
-    );
+    await fs.writeFile(temporaryPath, contents, "utf8");
     await fs.rename(temporaryPath, filePath);
   } finally {
     await fs.rm(temporaryPath, { force: true });

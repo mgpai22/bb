@@ -2826,4 +2826,90 @@ describe("dispatchCommand", () => {
       readAdvertisedThreadCommands({ dataDir, threadId: "thread-1" }),
     ).resolves.toBeNull();
   });
+
+  it("does not let a queued advertisement write recreate the cache after thread storage deletion", async () => {
+    const dataDir = await makeTempDir("bb-command-dispatch-thread-commands-");
+    const runtime = createRuntime();
+    let runtimeOptions: AgentRuntimeOptions | undefined;
+    const manager = new RuntimeManager({
+      dataDir,
+      createRuntime: (options) => {
+        runtimeOptions = options;
+        return runtime;
+      },
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await manager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+    runtime.setIdle("thread-1");
+    const storagePath = path.join(dataDir, "thread-storage", "thread-1");
+    const writeStarted = createDeferredPromise<void>();
+    const releaseWrite = createDeferredPromise<void>();
+    const originalWriteFile = fs.writeFile;
+    const originalRm = fs.rm;
+    // Hold the cache write before its temp file exists. Deletion releases it
+    // once thread storage is gone, before the cache file removal.
+    const writeSpy = vi
+      .spyOn(fs, "writeFile")
+      .mockImplementation(async (...args) => {
+        writeStarted.resolve();
+        await releaseWrite.promise;
+        return originalWriteFile(...args);
+      });
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementation(async (...args) => {
+      await originalRm(...args);
+      if (args[0] === storagePath) {
+        releaseWrite.resolve();
+      }
+    });
+    const renameDone = createDeferredPromise<void>();
+    const originalRename = fs.rename;
+    const renameSpy = vi
+      .spyOn(fs, "rename")
+      .mockImplementation(async (...args) => {
+        await originalRename(...args);
+        renameDone.resolve();
+      });
+    try {
+      runtimeOptions?.onThreadCommands?.({
+        threadId: "thread-1",
+        commands: [
+          { name: "jobs", description: "List jobs", argumentHint: null },
+        ],
+      });
+      await writeStarted.promise;
+
+      const deletion = dispatchCommand(
+        {
+          type: "thread.storage.delete",
+          environmentId: "env-1",
+          threadId: "thread-1",
+        },
+        {
+          dataDir,
+          logger: silentLogger,
+          eventSink: { emit: vi.fn(), flush: vi.fn(async () => undefined) },
+          fetchProjectAttachment: async () => {
+            throw new Error("Unexpected project attachment fetch");
+          },
+          fetchPluginHostArtifact: fetchDispatchTestArtifact,
+          ...unexpectedProviderMaintenance,
+          runtimeManager: manager,
+          threadStorageRootPath: path.join(dataDir, "thread-storage"),
+        },
+      );
+      await deletion;
+      await renameDone.promise;
+    } finally {
+      writeSpy.mockRestore();
+      rmSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+
+    await expect(
+      readAdvertisedThreadCommands({ dataDir, threadId: "thread-1" }),
+    ).resolves.toBeNull();
+  });
 });

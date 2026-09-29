@@ -44,7 +44,10 @@ import type { FetchSkillTree } from "./skill-trees.js";
 import { userExecutableProcessOptions } from "./user-executable-env.js";
 import { runSetupScript } from "./environment-lifecycle-script.js";
 import { runInSerialLane } from "./serial-lane.js";
-import { writeAdvertisedThreadCommands } from "./thread-commands-cache.js";
+import {
+  deleteAdvertisedThreadCommands,
+  writeAdvertisedThreadCommands,
+} from "./thread-commands-cache.js";
 
 type StopWatching = () => void | Promise<void>;
 
@@ -335,6 +338,15 @@ export class RuntimeManager {
     work: () => T | PromiseLike<T>,
   ): Promise<T> {
     return runInSerialLane(this.threadControlTails, threadId, work);
+  }
+
+  deleteThreadCommandsCache(args: {
+    dataDir: string;
+    threadId: string;
+  }): Promise<void> {
+    return runInSerialLane(this.threadCommandsCacheTails, args.threadId, () =>
+      deleteAdvertisedThreadCommands(args),
+    );
   }
 
   async releaseThreadFromOtherEnvironments(args: {

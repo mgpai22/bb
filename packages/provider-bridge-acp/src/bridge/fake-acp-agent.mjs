@@ -19,6 +19,11 @@
  * - FAKE_ACP_USAGE_ON_LOAD=1 → report context usage during session/load
  * - FAKE_ACP_USAGE_SESSION_ID
  *                            → override the usage notification session id
+ * - FAKE_ACP_COMMANDS_DURING_LOAD_CONFIG=1
+ *                            → after session/load, advertise commands and
+ *                              replay a message chunk before answering the
+ *                              next session/set_config_option, like omp acp's
+ *                              bootstrap advertisement during bb's config step
  * - FAKE_ACP_MODEL_LINES     → stdout for the agent's `--list-models` mode
  * - FAKE_ACP_MODEL_LIST_STDERR
  *                            → make `--list-models` fail with this stderr
@@ -90,6 +95,9 @@ const forkReuseSourceId = process.env.FAKE_ACP_FORK_REUSE_SOURCE_ID === "1";
 const usageOnLoad = process.env.FAKE_ACP_USAGE_ON_LOAD === "1";
 const usageSessionId = process.env.FAKE_ACP_USAGE_SESSION_ID;
 const loadRequireCwd = process.env.FAKE_ACP_LOAD_REQUIRE_CWD;
+const commandsDuringLoadConfig =
+  process.env.FAKE_ACP_COMMANDS_DURING_LOAD_CONFIG === "1";
+let loadConfigAdvertisementPending = false;
 const modelConfig = process.env.FAKE_ACP_MODEL_CONFIG === "1";
 const modelsField = process.env.FAKE_ACP_MODELS_FIELD === "1";
 const thoughtLevelConfig = process.env.FAKE_ACP_THOUGHT_LEVEL_CONFIG === "1";
@@ -786,6 +794,7 @@ async function handleMessage(message) {
           });
         } else {
           activeSessionId = message.params?.sessionId;
+          loadConfigAdvertisementPending = commandsDuringLoadConfig;
           send({ jsonrpc: "2.0", id: message.id, result: configState() });
         }
       } else {
@@ -847,6 +856,16 @@ async function handleMessage(message) {
     case "session/set_config_option": {
       const configId = message.params?.configId;
       const value = message.params?.value;
+      if (loadConfigAdvertisementPending) {
+        loadConfigAdvertisementPending = false;
+        notifyUpdate(messageChunk("replayed-history"));
+        notifyUpdate({
+          sessionUpdate: "available_commands_update",
+          availableCommands: [
+            { name: "jobs", description: "List background jobs" },
+          ],
+        });
+      }
       if (configId === "model") {
         if (setConfigModelError || value === setConfigModelErrorValue) {
           send({

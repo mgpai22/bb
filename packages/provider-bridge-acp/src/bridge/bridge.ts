@@ -245,6 +245,7 @@ interface AcpThreadSession {
   loading: boolean;
   loadingSessionId: string | undefined;
   pendingLoadUsageUpdate: AcpUsageUpdate | undefined;
+  pendingLoadCommands: AcpAdvertisedCommand[] | undefined;
   grokContextWindowSize: number | undefined;
   stopping: boolean;
   turnSettled: Promise<void> | undefined;
@@ -1923,6 +1924,7 @@ async function startAgentSession(
     loading: false,
     loadingSessionId: undefined,
     pendingLoadUsageUpdate: undefined,
+    pendingLoadCommands: undefined,
     grokContextWindowSize: undefined,
     stopping: false,
     turnSettled: undefined,
@@ -2005,6 +2007,7 @@ async function startAgentSession(
       session.loading = true;
       session.loadingSessionId = request.resumeProviderThreadId;
       session.pendingLoadUsageUpdate = undefined;
+      session.pendingLoadCommands = undefined;
       try {
         const configState = await connection.request({
           method: "session/load",
@@ -2029,6 +2032,7 @@ async function startAgentSession(
       session.loading = false;
       session.loadingSessionId = undefined;
       session.pendingLoadUsageUpdate = undefined;
+      session.pendingLoadCommands = undefined;
       const newSession = await connection.request({
         method: "session/new",
         params: { cwd: params.cwd, mcpServers },
@@ -2065,14 +2069,19 @@ async function startAgentSession(
         nativeReasoning: params.nativeReasoning,
       });
       const loadUsageUpdate = session.pendingLoadUsageUpdate;
+      const loadCommands = session.pendingLoadCommands;
       session.loading = false;
       session.loadingSessionId = undefined;
       session.pendingLoadUsageUpdate = undefined;
+      session.pendingLoadCommands = undefined;
       if (loadUsageUpdate) {
         emitStartNotification(ACP_UPDATE_METHOD, {
           threadId: session.bbThreadId,
           update: loadUsageUpdate,
         });
+      }
+      if (loadCommands) {
+        publishAdvertisedCommands(session, loadCommands);
       }
     }
 
@@ -2434,6 +2443,18 @@ function handleDialectRequest(
   responder.result(outcome.result);
 }
 
+function publishAdvertisedCommands(
+  session: AcpThreadSession,
+  commands: AcpAdvertisedCommand[],
+): void {
+  session.availableCommands = commands;
+  session.availableCommandsAdvertised = true;
+  sendNotification(BRIDGE_NOTIFICATION_METHODS.threadCommands, {
+    threadId: session.bbThreadId,
+    commands,
+  });
+}
+
 function handleAgentNotification(
   session: AcpThreadSession,
   method: string,
@@ -2450,13 +2471,18 @@ function handleAgentNotification(
     return;
   }
   if (session.loading) {
-    if (
-      parsed.data.sessionId === session.loadingSessionId &&
-      parsed.data.update.sessionUpdate === "usage_update"
-    ) {
-      const usageUpdate = acpUsageUpdateSchema.safeParse(parsed.data.update);
-      if (usageUpdate.success) {
-        session.pendingLoadUsageUpdate = usageUpdate.data;
+    if (parsed.data.sessionId === session.loadingSessionId) {
+      if (parsed.data.update.sessionUpdate === "usage_update") {
+        const usageUpdate = acpUsageUpdateSchema.safeParse(parsed.data.update);
+        if (usageUpdate.success) {
+          session.pendingLoadUsageUpdate = usageUpdate.data;
+        }
+      } else if (
+        parsed.data.update.sessionUpdate === "available_commands_update"
+      ) {
+        session.pendingLoadCommands =
+          normalizeAdvertisedCommands(parsed.data.update) ??
+          session.pendingLoadCommands;
       }
     }
     return;
@@ -2471,12 +2497,7 @@ function handleAgentNotification(
     }
     const advertised = normalizeAdvertisedCommands(parsed.data.update);
     if (advertised !== undefined) {
-      session.availableCommands = advertised;
-      session.availableCommandsAdvertised = true;
-      sendNotification(BRIDGE_NOTIFICATION_METHODS.threadCommands, {
-        threadId: session.bbThreadId,
-        commands: advertised,
-      });
+      publishAdvertisedCommands(session, advertised);
     }
   };
   if (session.providerThreadId === "") {

@@ -188,6 +188,13 @@ describe("buildCommandListResponse", () => {
           description: null,
           argumentHint: "arguments",
         },
+        {
+          name: "review",
+          source: "command",
+          origin: "project",
+          description: "Provider review command",
+          argumentHint: null,
+        },
       ],
       includeBuiltinCompact: false,
       skillCatalog: [
@@ -211,5 +218,6 @@ describe("buildCommandListResponse", () => {
     expect(keys).toContain("skill review");
     expect(keys).toContain("command skill:other");
     expect(keys).not.toContain("command skill:review");
+    expect(keys).toContain("command review");
   });
 });

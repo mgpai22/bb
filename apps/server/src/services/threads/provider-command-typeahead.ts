@@ -110,7 +110,11 @@ export function buildCommandListResponse(
       ...skillCommands,
       ...(args.advertisedCommands ?? [])
         .filter(
-          (command) => !skillNames.has(command.name.replace(/^skill:/, "")),
+          (command) =>
+            !(
+              command.name.startsWith("skill:") &&
+              skillNames.has(command.name.slice("skill:".length))
+            ),
         )
         .map(toProviderCommand),
       ...args.commands.map(toProviderCommand),

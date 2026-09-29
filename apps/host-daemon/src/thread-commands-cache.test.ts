@@ -140,6 +140,48 @@ describe("advertised thread commands cache", () => {
     ).resolves.toEqual([hostCommand(command("jobs"))]);
   });
 
+  it("round-trips 200 commands with long descriptions within the read cap", async () => {
+    const args = { dataDir: await makeDataDir(), threadId: "thr_1" };
+    const commands = Array.from({ length: 200 }, (_, index) =>
+      command(`skill:long-${index}`, {
+        description: "語".repeat(2000),
+        argumentHint: "語".repeat(600),
+      }),
+    );
+
+    await writeAdvertisedThreadCommands({ ...args, commands });
+
+    const cached = await readAdvertisedThreadCommands(args);
+    expect(cached).toHaveLength(200);
+    expect(cached?.[199]).toEqual({
+      name: "skill:long-199",
+      source: "command",
+      origin: "project",
+      description: "語".repeat(256),
+      argumentHint: "語".repeat(64),
+    });
+  });
+
+  it("skips a write that would exceed the read cap", async () => {
+    const args = { dataDir: await makeDataDir(), threadId: "thr_1" };
+    await writeAdvertisedThreadCommands({
+      ...args,
+      commands: [command("old")],
+    });
+
+    await expect(
+      writeAdvertisedThreadCommands({
+        ...args,
+        commands: Array.from({ length: 200 }, (_, index) =>
+          command(`${"n".repeat(2000)}-${index}`),
+        ),
+      }),
+    ).rejects.toThrow(/exceed/);
+    await expect(readAdvertisedThreadCommands(args)).resolves.toEqual([
+      hostCommand(command("old")),
+    ]);
+  });
+
   it("treats corrupt, schema-violating, and oversized files as a miss", async () => {
     const dataDir = await makeDataDir();
     await writeRawCacheFile(dataDir, "corrupt", "{not json");

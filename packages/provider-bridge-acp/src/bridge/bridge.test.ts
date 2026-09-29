@@ -4033,6 +4033,63 @@ describe("acp bridge", () => {
     expect(agentMessageTexts()).toContain("selected-effort:high");
   });
 
+  it("publishes commands advertised during session/load after the config step", async () => {
+    const envVars = {
+      FAKE_ACP_LOAD_SESSION: "1",
+      FAKE_ACP_MODEL_CONFIG: "1",
+    };
+    const first = await startThread({ envVars });
+    await stopThread(first.providerThreadId);
+    startedProviderThreadIds.pop();
+    const commandsBeforeResume = notifications(
+      "thread/commands/updated",
+    ).length;
+
+    const resumeId = sendRequest("thread/resume", {
+      threadId: first.bbThreadId,
+      cwd: workspaceDir,
+      instructionMode: "append",
+      options: executionOptions({
+        model: "fake/strong",
+        providerOptions: {
+          acpLaunchSpec: acpLaunchSpec({
+            envVars: {
+              ...envVars,
+              FAKE_ACP_COMMANDS_DURING_LOAD_CONFIG: "1",
+            },
+          }),
+        },
+      }),
+      providerThreadId: first.providerThreadId,
+    });
+    const response = await waitForResponse(resumeId);
+    expect(response.result).toEqual({
+      providerThreadId: first.providerThreadId,
+      sessionRestorable: true,
+    });
+    startedProviderThreadIds.push(first.providerThreadId);
+
+    const jobs = {
+      name: "jobs",
+      description: "List background jobs",
+      argumentHint: null,
+    };
+    expect(
+      notifications("thread/commands/updated")
+        .slice(commandsBeforeResume)
+        .map((notification) => notification.params),
+    ).toEqual([{ threadId: first.bbThreadId, commands: [jobs] }]);
+    const commandsId = sendRequest("thread/commands", {
+      threadId: first.bbThreadId,
+      providerThreadId: first.providerThreadId,
+    });
+    expect((await waitForResponse(commandsId)).result).toEqual({
+      commands: [jobs],
+      advertised: true,
+    });
+    expect(agentMessageTexts()).not.toContain("replayed-history");
+  });
+
   it("falls back to a fresh session with a warning when load is unsupported", async () => {
     const resumeId = sendRequest("thread/resume", {
       threadId: "thread-resume-fallback",
