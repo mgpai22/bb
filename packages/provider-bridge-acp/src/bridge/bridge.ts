@@ -2028,6 +2028,7 @@ async function startAgentSession(
       }
     }
 
+    let loadCommands: AcpAdvertisedCommand[] | undefined;
     if (sessionId === undefined) {
       session.loading = false;
       session.loadingSessionId = undefined;
@@ -2069,7 +2070,7 @@ async function startAgentSession(
         nativeReasoning: params.nativeReasoning,
       });
       const loadUsageUpdate = session.pendingLoadUsageUpdate;
-      const loadCommands = session.pendingLoadCommands;
+      loadCommands = session.pendingLoadCommands;
       session.loading = false;
       session.loadingSessionId = undefined;
       session.pendingLoadUsageUpdate = undefined;
@@ -2080,15 +2081,15 @@ async function startAgentSession(
           update: loadUsageUpdate,
         });
       }
-      if (loadCommands) {
-        publishAdvertisedCommands(session, loadCommands);
-      }
     }
 
     if (session.stopping) {
       throw new Error(
         `ACP session for thread "${bbThreadId}" was released during construction`,
       );
+    }
+    if (loadCommands) {
+      publishAdvertisedCommands(session, loadCommands);
     }
     session.providerThreadId = sessionId;
     bbThreadIdByProviderThreadId.set(sessionId, bbThreadId);

@@ -231,22 +231,6 @@ export class InteractiveRequestRegistry {
     }
   }
 
-  /** Rejects waiting requests whose server interactions another interrupt settled. */
-  interruptInteractions(
-    interactionIds: readonly string[],
-    reason: string,
-  ): void {
-    const ids = new Set(interactionIds);
-    for (const [key, entry] of this.pendingEntries) {
-      if (entry.interactionId === null || !ids.has(entry.interactionId)) {
-        continue;
-      }
-
-      this.pendingEntries.delete(key);
-      entry.reject(new Error(reason));
-    }
-  }
-
   private addDeliveredTombstone(key: string): void {
     const existing = this.deliveredTombstones.get(key);
     if (existing) {

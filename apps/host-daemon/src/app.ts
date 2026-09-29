@@ -340,7 +340,7 @@ export async function createHostDaemonApp(
 
         const [key, request] = nextEntry;
         try {
-          const { interactionIds } = await runSessionRequest({
+          await runSessionRequest({
             source: "interruptInteractiveRequests",
             request: () => serverClient.interruptInteractiveRequests(request),
           });
@@ -348,10 +348,6 @@ export async function createHostDaemonApp(
           if (pendingInteractiveInterrupts.get(key) === request) {
             pendingInteractiveInterrupts.delete(key);
           }
-          interactiveRequestRegistry.interruptInteractions(
-            interactionIds,
-            request.reason,
-          );
         } catch (error) {
           options.logger.warn(
             {

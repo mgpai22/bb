@@ -162,7 +162,7 @@ describe("advertised thread commands cache", () => {
     });
   });
 
-  it("skips a write that would exceed the read cap", async () => {
+  it("drops the stale list when a write would exceed the read cap", async () => {
     const args = { dataDir: await makeDataDir(), threadId: "thr_1" };
     await writeAdvertisedThreadCommands({
       ...args,
@@ -177,9 +177,7 @@ describe("advertised thread commands cache", () => {
         ),
       }),
     ).rejects.toThrow(/exceed/);
-    await expect(readAdvertisedThreadCommands(args)).resolves.toEqual([
-      hostCommand(command("old")),
-    ]);
+    await expect(readAdvertisedThreadCommands(args)).resolves.toBeNull();
   });
 
   it("treats corrupt, schema-violating, and oversized files as a miss", async () => {

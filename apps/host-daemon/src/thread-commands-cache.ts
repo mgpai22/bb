@@ -97,6 +97,7 @@ export async function writeAdvertisedThreadCommands(
     commands: hostThreadCommands(args.commands),
   });
   if (Buffer.byteLength(contents, "utf8") > MAX_CACHE_FILE_BYTES) {
+    await fs.rm(filePath, { force: true });
     throw new Error(
       `Advertised commands exceed the ${MAX_CACHE_FILE_BYTES}-byte cache limit`,
     );

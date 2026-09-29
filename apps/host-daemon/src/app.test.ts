@@ -1251,64 +1251,6 @@ describe("createHostDaemonApp", () => {
     }
   });
 
-  it("rejects a waiting request that a thread-wide interrupt settled on the server", async () => {
-    const { app, fetchRecorder, runtimeOptions } = await createAppFixture({
-      respondToInteractiveRequest: (interaction) =>
-        interaction.providerRequestId === "fails"
-          ? Response.json(
-              {
-                code: "invalid_request",
-                message: "registration refused",
-                retryable: false,
-              },
-              { status: 400 },
-            )
-          : Response.json({
-              outcome: "created",
-              interactionId: "pint_waiting",
-              status: "pending",
-            }),
-      respondToInteractiveInterrupt: async () =>
-        Response.json({ ok: true, interactionIds: ["pint_waiting"] }),
-    });
-    try {
-      const workspacePath = await makeTempDir("bb-host-daemon-app-settled-");
-      await app.connection.start();
-      await app.runtimeManager.ensureEnvironment({
-        environmentId: "env-app-settled",
-        workspacePath,
-      });
-      const options = runtimeOptions.current;
-      if (!options?.onInteractiveRequest) {
-        throw new Error("Expected interactive request callback to be captured");
-      }
-      const waiting = options.onInteractiveRequest(
-        createCommandApprovalRequest(),
-      );
-      const waitingRejection = expect(waiting).rejects.toThrow(
-        "registration refused",
-      );
-      await vi.waitFor(() => {
-        expect(
-          fetchRecorder.requests.filter(
-            (record) =>
-              record.pathname === "/internal/session/interactive-request",
-          ),
-        ).toHaveLength(1);
-      });
-      await expect(
-        options.onInteractiveRequest({
-          ...createCommandApprovalRequest(),
-          providerRequestId: "fails",
-        }),
-      ).rejects.toThrow("registration refused");
-
-      await waitingRejection;
-    } finally {
-      await app.daemon.shutdown("test", 0);
-    }
-  });
-
   it("forwards the runtime cancellation signal through the daemon tool callback", async () => {
     let signal: AbortSignal | null | undefined;
     const { app, runtimeOptions } = await createAppFixture({
