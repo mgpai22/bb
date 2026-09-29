@@ -1350,10 +1350,11 @@ describe("acp bridge", () => {
     expect(agentMessageTexts()).toContain("selected-model:fake/strong");
   });
 
-  it("falls back to session/set_model when the model config option errors", async () => {
+  it("falls back to session/set_model when the model config option errors and the agent advertises session models", async () => {
     const { providerThreadId } = await startThread({
       envVars: {
         FAKE_ACP_MODEL_CONFIG: "1",
+        FAKE_ACP_MODELS_FIELD: "1",
         FAKE_ACP_SET_CONFIG_MODEL_ERROR: "1",
       },
       model: "fake/strong",
@@ -1365,6 +1366,24 @@ describe("acp bridge", () => {
     await waitForTurnCompleted();
 
     expect(agentMessageTexts()).toContain("selected-model:fake/strong");
+  });
+
+  it("surfaces the model config option error without session/set_model when the agent advertises no session models", async () => {
+    const requestLog = join(workspaceDir, "model-config-error-requests.jsonl");
+    await expect(
+      startThread({
+        envVars: {
+          FAKE_ACP_MODEL_CONFIG: "1",
+          FAKE_ACP_SET_CONFIG_MODEL_ERROR: "1",
+          FAKE_ACP_REQUEST_LOG: requestLog,
+        },
+        model: "fake/strong",
+      }),
+    ).rejects.toThrow(/model config probe failed/u);
+
+    expect(
+      loggedAcpRequests(requestLog).map((request) => request.method),
+    ).not.toContain("session/set_model");
   });
 
   it("selects ACP-native models from session models state", async () => {
@@ -1397,6 +1416,20 @@ describe("acp bridge", () => {
     await waitForTurnCompleted();
 
     expect(agentMessageTexts()).toContain("selected-effort:xhigh");
+  });
+
+  it("fails session construction when a requested reasoning level is rejected", async () => {
+    await expect(
+      startThread({
+        envVars: {
+          FAKE_ACP_MODEL_CONFIG: "1",
+          FAKE_ACP_THOUGHT_LEVEL_CONFIG: "1",
+          FAKE_ACP_SET_CONFIG_EFFORT_ERROR: "1",
+        },
+        model: "fake/strong",
+        reasoningLevel: "max",
+      }),
+    ).rejects.toThrow(/effort config update failed/u);
   });
 
   it("applies configured native reasoning when the ACP agent does not advertise thought_level", async () => {

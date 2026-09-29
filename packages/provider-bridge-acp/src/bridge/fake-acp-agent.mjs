@@ -36,6 +36,8 @@
  *                            → fail session/set_config_option for one model
  * - FAKE_ACP_SET_CONFIG_FAST_ERROR=1
  *                            → fail session/set_config_option for Fast values
+ * - FAKE_ACP_SET_CONFIG_EFFORT_ERROR=1
+ *                            → fail session/set_config_option for effort values
  * - FAKE_ACP_CURSOR_PARAMETERIZED_MODELS=1
  *                            → mirror Cursor compatibility-vs-parameterized
  *                              model/config-option responses
@@ -92,6 +94,8 @@ const setConfigModelError = process.env.FAKE_ACP_SET_CONFIG_MODEL_ERROR === "1";
 const setConfigModelErrorValue =
   process.env.FAKE_ACP_SET_CONFIG_MODEL_ERROR_VALUE;
 const setConfigFastError = process.env.FAKE_ACP_SET_CONFIG_FAST_ERROR === "1";
+const setConfigEffortError =
+  process.env.FAKE_ACP_SET_CONFIG_EFFORT_ERROR === "1";
 const cursorParameterizedModels =
   process.env.FAKE_ACP_CURSOR_PARAMETERIZED_MODELS === "1";
 const requestLog = process.env.FAKE_ACP_REQUEST_LOG;
@@ -811,6 +815,14 @@ async function handleMessage(message) {
         return;
       }
       if (configId === "effort") {
+        if (setConfigEffortError) {
+          send({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: -32603, message: "effort config update failed" },
+          });
+          return;
+        }
         const efforts = cursorParameterizedModels
           ? ["low", "medium", "high", "xhigh"]
           : effortsByModel.get(selectedModel);
