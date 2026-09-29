@@ -26,7 +26,10 @@ interface InteractiveRequestRegistryOptions {
     failure: InteractiveRequestRegistrationFailure,
   ) => void;
   /** A registered request the provider withdrew; the server row is stale. */
-  onWithdrawn?: (request: PendingInteractionCreate) => void;
+  onWithdrawn?: (
+    request: PendingInteractionCreate,
+    interactionId: string,
+  ) => void;
   registerRequest: (
     request: PendingInteractionCreate,
   ) => Promise<HostDaemonInteractiveRequestResponse>;
@@ -133,18 +136,19 @@ export class InteractiveRequestRegistry {
       request,
     };
     this.pendingEntries.set(key, entry);
-    let registered = false;
-    const withdraw = () => {
+    const withdraw = (interactionId: string) => {
       if (this.pendingEntries.get(key) !== entry) return;
       this.pendingEntries.delete(key);
       entry.reject(new Error("Provider withdrew the interactive request"));
-      this.options.onWithdrawn?.(request);
+      this.options.onWithdrawn?.(request, interactionId);
     };
     // A mid-registration abort is handled once registration returns, so the
     // server interrupt can never overtake the registration it withdraws.
-    signal?.addEventListener("abort", () => registered && withdraw(), {
-      once: true,
-    });
+    signal?.addEventListener(
+      "abort",
+      () => entry.interactionId !== null && withdraw(entry.interactionId),
+      { once: true },
+    );
 
     try {
       const response = await this.options.registerRequest(request);
@@ -160,7 +164,6 @@ export class InteractiveRequestRegistry {
       }
 
       entry.interactionId = response.interactionId;
-      registered = true;
       if (response.status !== "pending" && response.status !== "resolving") {
         this.pendingEntries.delete(key);
         entry.reject(
@@ -169,7 +172,7 @@ export class InteractiveRequestRegistry {
           ),
         );
       } else if (signal?.aborted) {
-        withdraw();
+        withdraw(response.interactionId);
       }
     } catch (error) {
       this.pendingEntries.delete(key);
@@ -225,6 +228,22 @@ export class InteractiveRequestRegistry {
 
       this.pendingEntries.delete(key);
       entry.reject(new Error(args.reason));
+    }
+  }
+
+  /** Rejects waiting requests whose server interactions another interrupt settled. */
+  interruptInteractions(
+    interactionIds: readonly string[],
+    reason: string,
+  ): void {
+    const ids = new Set(interactionIds);
+    for (const [key, entry] of this.pendingEntries) {
+      if (entry.interactionId === null || !ids.has(entry.interactionId)) {
+        continue;
+      }
+
+      this.pendingEntries.delete(key);
+      entry.reject(new Error(reason));
     }
   }
 

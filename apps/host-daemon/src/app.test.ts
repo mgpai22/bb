@@ -12,6 +12,8 @@ import {
 import {
   hostDaemonEventBatchRequestSchema,
   hostDaemonInteractiveInterruptRequestSchema,
+  hostDaemonInteractiveRequestSchema,
+  type HostDaemonInteractiveInterruptRequest,
   type HostDaemonInteractiveRequestResponse,
   type HostDaemonContributedEnvEntry,
 } from "@bb/host-daemon-contract";
@@ -55,6 +57,12 @@ interface CreateFetchRecorderArgs {
   inactiveSessionOnFirstEventPost?: boolean;
   interactiveRequestError?: Error;
   interactiveRequestResponse?: HostDaemonInteractiveRequestResponse;
+  respondToInteractiveRequest?: (
+    interaction: PendingInteractionCreate,
+  ) => Response;
+  respondToInteractiveInterrupt?: (
+    payload: HostDaemonInteractiveInterruptRequest,
+  ) => Promise<Response>;
   retiredEnvironmentIds?: string[];
   sessionIds?: string[];
 }
@@ -171,6 +179,13 @@ function createFetchRecorder(
       if (args.interactiveRequestError) {
         throw args.interactiveRequestError;
       }
+      if (args.respondToInteractiveRequest) {
+        return args.respondToInteractiveRequest(
+          hostDaemonInteractiveRequestSchema.parse(
+            JSON.parse(request.body ?? "{}"),
+          ).interaction,
+        );
+      }
       const response: HostDaemonInteractiveRequestResponse =
         args.interactiveRequestResponse ?? {
           outcome: "created",
@@ -180,6 +195,13 @@ function createFetchRecorder(
       return Response.json(response);
     }
     if (url.pathname === "/internal/session/interactive-request/interrupt") {
+      if (args.respondToInteractiveInterrupt) {
+        return args.respondToInteractiveInterrupt(
+          hostDaemonInteractiveInterruptRequestSchema.parse(
+            JSON.parse(request.body ?? "{}"),
+          ),
+        );
+      }
       return Response.json({
         ok: true,
         interactionIds: ["pint_app_test"],
@@ -1150,7 +1172,138 @@ describe("createHostDaemonApp", () => {
         providerId: "codex",
         threadIds: [request.threadId],
         reason: "Provider withdrew the interactive request",
+        interactionId: "pint_app_test",
       });
+    } finally {
+      await app.daemon.shutdown("test", 0);
+    }
+  });
+
+  it("sends every withdrawal when a second one arrives while the first interrupt is in flight", async () => {
+    const firstInterruptResponse = createDeferredPromise<Response>();
+    const interruptPayloads: HostDaemonInteractiveInterruptRequest[] = [];
+    const { app, fetchRecorder, runtimeOptions } = await createAppFixture({
+      respondToInteractiveRequest: (interaction) =>
+        Response.json({
+          outcome: "created",
+          interactionId: `pint_${interaction.providerRequestId}`,
+          status: "pending",
+        }),
+      respondToInteractiveInterrupt: async (payload) => {
+        interruptPayloads.push(payload);
+        return interruptPayloads.length === 1
+          ? firstInterruptResponse.promise
+          : Response.json({
+              ok: true,
+              interactionIds: [payload.interactionId],
+            });
+      },
+    });
+    try {
+      const workspacePath = await makeTempDir("bb-host-daemon-app-withdraw-2-");
+      await app.connection.start();
+      await app.runtimeManager.ensureEnvironment({
+        environmentId: "env-app-withdraw-2",
+        workspacePath,
+      });
+      const options = runtimeOptions.current;
+      if (!options?.onInteractiveRequest) {
+        throw new Error("Expected interactive request callback to be captured");
+      }
+      const first = new AbortController();
+      const second = new AbortController();
+      const firstPending = options.onInteractiveRequest(
+        { ...createCommandApprovalRequest(), providerRequestId: "a" },
+        first.signal,
+      );
+      const secondPending = options.onInteractiveRequest(
+        { ...createCommandApprovalRequest(), providerRequestId: "b" },
+        second.signal,
+      );
+      await vi.waitFor(() => {
+        expect(
+          fetchRecorder.requests.filter(
+            (record) =>
+              record.pathname === "/internal/session/interactive-request",
+          ),
+        ).toHaveLength(2);
+      });
+
+      first.abort();
+      await expect(firstPending).rejects.toThrow(
+        "Provider withdrew the interactive request",
+      );
+      await vi.waitFor(() => expect(interruptPayloads).toHaveLength(1));
+      second.abort();
+      await expect(secondPending).rejects.toThrow(
+        "Provider withdrew the interactive request",
+      );
+      firstInterruptResponse.resolve(
+        Response.json({ ok: true, interactionIds: ["pint_a"] }),
+      );
+
+      await vi.waitFor(() => expect(interruptPayloads).toHaveLength(2));
+      expect(interruptPayloads.map((payload) => payload.interactionId)).toEqual(
+        ["pint_a", "pint_b"],
+      );
+    } finally {
+      await app.daemon.shutdown("test", 0);
+    }
+  });
+
+  it("rejects a waiting request that a thread-wide interrupt settled on the server", async () => {
+    const { app, fetchRecorder, runtimeOptions } = await createAppFixture({
+      respondToInteractiveRequest: (interaction) =>
+        interaction.providerRequestId === "fails"
+          ? Response.json(
+              {
+                code: "invalid_request",
+                message: "registration refused",
+                retryable: false,
+              },
+              { status: 400 },
+            )
+          : Response.json({
+              outcome: "created",
+              interactionId: "pint_waiting",
+              status: "pending",
+            }),
+      respondToInteractiveInterrupt: async () =>
+        Response.json({ ok: true, interactionIds: ["pint_waiting"] }),
+    });
+    try {
+      const workspacePath = await makeTempDir("bb-host-daemon-app-settled-");
+      await app.connection.start();
+      await app.runtimeManager.ensureEnvironment({
+        environmentId: "env-app-settled",
+        workspacePath,
+      });
+      const options = runtimeOptions.current;
+      if (!options?.onInteractiveRequest) {
+        throw new Error("Expected interactive request callback to be captured");
+      }
+      const waiting = options.onInteractiveRequest(
+        createCommandApprovalRequest(),
+      );
+      const waitingRejection = expect(waiting).rejects.toThrow(
+        "registration refused",
+      );
+      await vi.waitFor(() => {
+        expect(
+          fetchRecorder.requests.filter(
+            (record) =>
+              record.pathname === "/internal/session/interactive-request",
+          ),
+        ).toHaveLength(1);
+      });
+      await expect(
+        options.onInteractiveRequest({
+          ...createCommandApprovalRequest(),
+          providerRequestId: "fails",
+        }),
+      ).rejects.toThrow("registration refused");
+
+      await waitingRejection;
     } finally {
       await app.daemon.shutdown("test", 0);
     }

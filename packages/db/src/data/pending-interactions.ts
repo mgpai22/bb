@@ -58,6 +58,7 @@ export interface SetPendingInteractionResolvingArgs {
 }
 
 export interface InterruptPendingInteractionsForThreadsArgs {
+  interactionId?: string;
   providerId: string;
   resolvedAt?: number;
   statusReason: string;
@@ -351,6 +352,9 @@ export function interruptPendingInteractionsForThreads(
     extraConditions: [
       eq(pendingInteractions.originKind, "provider"),
       eq(pendingInteractions.providerId, args.providerId),
+      ...(args.interactionId
+        ? [eq(pendingInteractions.id, args.interactionId)]
+        : []),
     ],
     resolvedAt: args.resolvedAt,
     statusReason: args.statusReason,

@@ -829,6 +829,8 @@ export const hostDaemonInteractiveInterruptRequestSchema = z.object({
   providerId: z.string().min(1),
   threadIds: z.array(z.string().min(1)).min(1),
   reason: z.string().min(1),
+  /** Interrupt only this interaction; omitted interrupts every provider interaction on the threads. */
+  interactionId: z.string().min(1).optional(),
 });
 export type HostDaemonInteractiveInterruptRequest = z.infer<
   typeof hostDaemonInteractiveInterruptRequestSchema

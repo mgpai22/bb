@@ -135,6 +135,8 @@ export interface HostDaemonApp {
 }
 
 interface PendingInteractiveInterruptRequest {
+  /** Set for a withdrawal; omitted interrupts every provider interaction on the threads. */
+  interactionId?: string;
   providerId: string;
   reason: string;
   threadIds: readonly string[];
@@ -295,6 +297,7 @@ export async function createHostDaemonApp(
       request.providerId,
       request.reason,
       [...request.threadIds].sort().join(","),
+      request.interactionId ?? "",
     ].join("|");
   }
 
@@ -337,11 +340,18 @@ export async function createHostDaemonApp(
 
         const [key, request] = nextEntry;
         try {
-          await runSessionRequest({
+          const { interactionIds } = await runSessionRequest({
             source: "interruptInteractiveRequests",
             request: () => serverClient.interruptInteractiveRequests(request),
           });
-          pendingInteractiveInterrupts.delete(key);
+          // A same-key enqueue during the POST replaced this entry; keep it.
+          if (pendingInteractiveInterrupts.get(key) === request) {
+            pendingInteractiveInterrupts.delete(key);
+          }
+          interactiveRequestRegistry.interruptInteractions(
+            interactionIds,
+            request.reason,
+          );
         } catch (error) {
           options.logger.warn(
             {
@@ -397,8 +407,9 @@ export async function createHostDaemonApp(
         threadIds: [request.threadId],
       });
     },
-    onWithdrawn: (request) => {
+    onWithdrawn: (request, interactionId) => {
       enqueueInteractiveInterrupt({
+        interactionId,
         providerId: request.providerId,
         reason: "Provider withdrew the interactive request",
         threadIds: [request.threadId],

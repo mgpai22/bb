@@ -244,6 +244,7 @@ export function registerInternalInteractiveRequestRoutes(
 
       const interrupted =
         deps.pendingInteractions.interruptPendingInteractionsForThreads({
+          interactionId: payload.interactionId,
           providerId: payload.providerId,
           threadIds: interruptibleThreadIds,
           reason: payload.reason,
