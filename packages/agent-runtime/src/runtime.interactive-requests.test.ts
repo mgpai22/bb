@@ -1,4 +1,5 @@
 import { RuntimeToolCalls } from "./runtime-provider-requests.js";
+import { fileURLToPath } from "node:url";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -700,6 +701,47 @@ describe("createAgentRuntime interactive requests", () => {
       expect((await firstLine).trim()).toBe("sentinel");
     } finally {
       child.kill();
+    }
+  });
+
+  it("aborts a withdrawn interactive request and forwards only hosted thread commands", async () => {
+    let signal: AbortSignal | undefined;
+    const threadCommands: { threadId: string }[] = [];
+    const runtime = createScriptedEchoRuntime({
+      runtime: {
+        workspacePath: tmpDir,
+        onEvent: () => {},
+        onInteractiveRequest: (_request, abortSignal) => {
+          signal = abortSignal;
+          return new Promise<PendingInteractionResolution>(() => {});
+        },
+        onThreadCommands: (args) => threadCommands.push(args),
+      },
+      launch: {
+        modulePath: fileURLToPath(
+          new URL("./test/bridges/withdrawal-bridge.ts", import.meta.url),
+        ),
+        pluginId: "provider-withdrawal",
+      },
+    });
+    try {
+      await runtime.startThread({
+        environmentId: "env-1",
+        threadId: "t1",
+        projectId: "p1",
+        providerId: "fake",
+        options: fullRuntimeOptions,
+      });
+
+      await vi.waitFor(() => expect(signal?.aborted).toBe(true));
+      expect(threadCommands).toEqual([
+        {
+          threadId: "t1",
+          commands: [{ name: "review", description: "t1", argumentHint: null }],
+        },
+      ]);
+    } finally {
+      await runtime.shutdown();
     }
   });
 });
