@@ -1228,8 +1228,10 @@ async function selectAcpNativeModel(args: {
           resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
         });
         setModel = false;
-      } catch {
-        setModel = true;
+      } catch (error) {
+        if (args.models === undefined) {
+          throw error;
+        }
       }
     }
     if (setModel) {
@@ -1283,17 +1285,15 @@ async function selectAcpNativeReasoning(args: {
   if (value === undefined) {
     return;
   }
-  try {
-    await args.connection.request({
-      method: "session/set_config_option",
-      params: {
-        sessionId: args.sessionId,
-        configId: thoughtLevelOption.id,
-        value,
-      },
-      resultSchema: acpConfigStateResultSchema,
-    });
-  } catch {}
+  await args.connection.request({
+    method: "session/set_config_option",
+    params: {
+      sessionId: args.sessionId,
+      configId: thoughtLevelOption.id,
+      value,
+    },
+    resultSchema: acpConfigStateResultSchema,
+  });
 }
 
 async function selectAcpNativeServiceTier(args: {

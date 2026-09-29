@@ -517,6 +517,34 @@ describe("acp configOptions model catalog", () => {
     expect(acpNativeReasoningLevelToValue("low", thoughtLevel)).toBe("minimal");
   });
 
+  it("maps OMP thinking off to bb none and never defaults to it from auto", () => {
+    const thoughtLevel = {
+      id: "thinking",
+      category: "thought_level",
+      type: "select",
+      currentValue: "off",
+      options: [
+        { value: "off", name: "Off" },
+        { value: "auto", name: "Auto" },
+        { value: "minimal", name: "minimal" },
+        { value: "high", name: "high" },
+        { value: "xhigh", name: "xhigh" },
+      ],
+    };
+
+    const support = buildAcpNativeReasoningSupport(thoughtLevel);
+    expect(support.defaultReasoningEffort).toBe("none");
+    expect(
+      support.supportedReasoningEfforts.map((e) => e.reasoningEffort),
+    ).toEqual(["none", "low", "high", "xhigh"]);
+    expect(acpNativeReasoningLevelToValue("none", thoughtLevel)).toBe("off");
+    expect(acpNativeReasoningLevelToValue("max", thoughtLevel)).toBe("xhigh");
+    expect(
+      buildAcpNativeReasoningSupport({ ...thoughtLevel, currentValue: "auto" })
+        .defaultReasoningEffort,
+    ).toBe("low");
+  });
+
   it("falls back to the first model when currentValue is absent or stale", () => {
     expect(
       buildModelCatalogFromConfigOptions({

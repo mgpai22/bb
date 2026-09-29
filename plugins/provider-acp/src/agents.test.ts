@@ -341,6 +341,32 @@ describe("acpProviderDeclaration", () => {
     expect(cursor.maintenance?.installation).toBe(true);
   });
 
+  it("declares omp's thinking ladder, no Fast tier, and its current repository", () => {
+    const omp = acpProviderDeclaration(
+      KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-omp")!,
+    );
+    expect(omp.capabilities.reasoningLevels).toEqual([
+      "none",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(omp.capabilities.supportsServiceTier).toBe(false);
+    expect(omp).not.toHaveProperty("serviceTiers");
+    expect(omp.strings?.installUrl).toBe("https://github.com/can1357/oh-my-pi");
+
+    for (const agent of KNOWN_ACP_AGENTS.filter((a) => a.id !== "acp-omp")) {
+      const declaration = acpProviderDeclaration(agent);
+      expect(declaration.capabilities.supportsServiceTier).toBe(true);
+      expect(declaration.serviceTiers?.map((tier) => tier.id)).toEqual([
+        "default",
+        "fast",
+      ]);
+    }
+  });
+
   it("gives a configured agent honest copy when it names no sign-in command", () => {
     const declaration = acpProviderDeclaration(
       customAcpAgentDefinition({
