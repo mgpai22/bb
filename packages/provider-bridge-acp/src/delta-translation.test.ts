@@ -3092,6 +3092,129 @@ describe("acp delta translation (dialects)", () => {
       ]);
     });
 
+    it("aggregates a mixed batch whose members all settled before the spawn returned", () => {
+      const harness = dialectHarness("omp");
+      harness.translate(ompTaskCall(SINGLE_TASK));
+      expect(
+        completedItems(
+          harness.translate(
+            taskFrame({
+              status: "completed",
+              state: "failed",
+              progress: [
+                { id: "A", status: "failed" },
+                { id: "B", status: "completed" },
+              ],
+              results: [{ id: "B", exitCode: 0, output: "B done" }],
+            }),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "failed",
+          summary: "A: failed\n\nB: B done",
+        }),
+      ]);
+    });
+
+    it.each([
+      ["a failure without a yield", { status: "failed" }],
+      [
+        "a failure after a successful yield",
+        {
+          status: "failed",
+          extractedToolData: { yield: [{ data: "child ok" }] },
+        },
+      ],
+      ["a success without a summary", { status: "completed" }],
+    ])("keeps the later wait row after %s", (_name, progress) => {
+      const { harness } = spawned(["A"]);
+      harness.translate(
+        taskFrame({
+          status: "in_progress",
+          progress: [{ id: "A", ...progress }],
+        }),
+      );
+      expect(harness.translate(waitCall("toolu_wait"))).toEqual([
+        expect.objectContaining({ type: "item/started" }),
+      ]);
+      const items = completedItems(
+        harness.translate(
+          waitResult("toolu_wait", [
+            {
+              id: "A",
+              type: "task",
+              status: "failed",
+              agentUrlId: "A",
+              errorText: "Workspace merge failed: changes kept in /tmp/wt",
+            },
+          ]),
+        ),
+      );
+      expect(items).toEqual([expect.objectContaining({ type: "toolCall" })]);
+      expect(JSON.stringify(items)).toContain("Workspace merge failed");
+    });
+
+    it("opens a later {i}-only call live once an auto-delivered result is followed by another tool", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(
+        taskFrame({
+          status: "in_progress",
+          progress: [
+            {
+              id: "SubOk",
+              status: "completed",
+              extractedToolData: { yield: [{ data: "sub-ok" }] },
+            },
+          ],
+        }),
+      );
+      expect(
+        harness.translate(waitCall("toolu_todo", "Checking todos")),
+      ).toEqual([]);
+      harness.translate(
+        updateEvent({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "toolu_todo",
+          status: "completed",
+          rawOutput: { content: [{ type: "text", text: "no todos" }] },
+        }),
+      );
+      expect(harness.translate(waitCall("toolu_next", "Next step"))).toEqual([
+        expect.objectContaining({ type: "item/started" }),
+      ]);
+    });
+
+    it("opens a later {i}-only call live once a non-wait tool follows an auto-delivered result", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(
+        taskFrame({
+          status: "in_progress",
+          progress: [
+            {
+              id: "SubOk",
+              status: "completed",
+              extractedToolData: { yield: [{ data: "sub-ok" }] },
+            },
+          ],
+        }),
+      );
+      harness.translate(
+        updateEvent({
+          sessionUpdate: "tool_call",
+          toolCallId: "toolu_read",
+          title: "Read notes",
+          kind: "read",
+          status: "pending",
+          rawInput: { path: "/tmp/notes.md" },
+        }),
+      );
+      expect(harness.translate(waitCall("toolu_next", "Next step"))).toEqual([
+        expect.objectContaining({ type: "item/started" }),
+      ]);
+    });
+
     it("keeps a wait row that reports an unrelated job", () => {
       const { harness } = spawned(["SubOk"]);
       harness.translate(waitCall("toolu_wait"));
