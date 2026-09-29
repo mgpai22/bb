@@ -2760,6 +2760,309 @@ describe("acp delta translation (dialects)", () => {
     ).toMatchObject({ type: "item/started", item: { type: "toolCall" } });
   });
 
+  describe("omp async task jobs", () => {
+    const SINGLE_TASK = {
+      context: "Goal",
+      tasks: [{ task: "Reply sub-ok", solutionSpace: "one reply" }],
+    };
+
+    function asyncSpawnResult(toolCallId: string, jobIds: string[]) {
+      return updateEvent({
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        rawOutput: {
+          content: [
+            {
+              type: "text",
+              text: `Spawned agent \`${jobIds[0] ?? ""}\` (job \`${jobIds[0] ?? ""}\`).`,
+            },
+          ],
+          details: {
+            projectAgentsDir: null,
+            results: [],
+            totalDurationMs: 1,
+            progress: jobIds.map((id, index) => ({
+              index,
+              id,
+              agent: "sonic",
+              status: "pending",
+            })),
+            async: { state: "running", jobId: jobIds[0], type: "task" },
+          },
+        },
+      });
+    }
+
+    function waitCall(toolCallId: string, intent = "Waiting for SubOk result") {
+      return updateEvent({
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: intent,
+        kind: "other",
+        status: "pending",
+        rawInput: { i: intent },
+      });
+    }
+
+    function waitResult(toolCallId: string, jobs: Record<string, unknown>[]) {
+      return updateEvent({
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        rawOutput: {
+          content: [{ type: "text", text: "## Completed (1)" }],
+          details: {
+            op: "wait",
+            meta: {
+              source: { type: "report", value: "background jobs snapshot" },
+            },
+            jobs,
+          },
+        },
+      });
+    }
+
+    function taskResultText(id: string, output: string) {
+      return `<task-result id="${id}" agent="sonic" status="completed" duration="9.3s">\n<meta lines="1" size="8B" />\n<output>\n${output}\n</output>\n</task-result>\n\n${id} is now idle`;
+    }
+
+    function completedJob(id: string, output: string) {
+      return {
+        id,
+        type: "task",
+        status: "completed",
+        label: id,
+        durationMs: 9281,
+        resultText: taskResultText(id, output),
+        agentUrlId: id,
+      };
+    }
+
+    function spawned(jobIds: string[]) {
+      const harness = dialectHarness("omp");
+      harness.translate(ompTaskCall(SINGLE_TASK, "Spawning sub-ok subagent"));
+      const events = harness.translate(
+        asyncSpawnResult("toolu_omp_task", jobIds),
+      );
+      return { harness, events };
+    }
+
+    it("keeps an async spawn open and settles it with the wait result", () => {
+      const { harness, events } = spawned(["SubOk"]);
+      expect(events).toEqual([]);
+      expect(harness.translate(waitCall("toolu_wait"))).toEqual([]);
+      const settled = harness.translate(
+        waitResult("toolu_wait", [completedJob("SubOk", '"sub-ok"')]),
+      );
+      expect(settled).toEqual([
+        expect.objectContaining({
+          type: "item/completed",
+          item: expect.objectContaining({
+            type: "delegation",
+            childRef: "toolu_omp_task",
+            status: "completed",
+            summary: '"sub-ok"',
+          }),
+        }),
+      ]);
+      expect(
+        completedItems(harness.translate(turnCompletedEvent("end_turn"))),
+      ).toEqual([]);
+    });
+
+    it("closes a batch delegation only after every job settles", () => {
+      const { harness } = spawned(["A", "B"]);
+      harness.translate(waitCall("toolu_wait_1"));
+      expect(
+        harness.translate(
+          waitResult("toolu_wait_1", [
+            completedJob("A", "a-done"),
+            { id: "B", type: "task", status: "running", label: "B" },
+          ]),
+        ),
+      ).toEqual([]);
+      harness.translate(waitCall("toolu_wait_2"));
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait_2", [completedJob("B", "b-done")]),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "completed",
+          summary: "A: a-done\n\nB: b-done",
+        }),
+      ]);
+    });
+
+    it.each(["failed", "cancelled"])(
+      "marks the delegation failed when its job is %s",
+      (status) => {
+        const { harness } = spawned(["SubOk"]);
+        harness.translate(waitCall("toolu_wait"));
+        expect(
+          completedItems(
+            harness.translate(
+              waitResult("toolu_wait", [
+                {
+                  id: "SubOk",
+                  type: "task",
+                  status,
+                  label: "SubOk",
+                  errorText: "  boom  ",
+                  agentUrlId: "SubOk",
+                },
+              ]),
+            ),
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            type: "delegation",
+            status: "failed",
+            summary: "boom",
+          }),
+        ]);
+      },
+    );
+
+    it("keeps a wait row that reports an unrelated job", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_wait"));
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait", [
+              completedJob("SubOk", "ok"),
+              completedJob("Other", "other"),
+            ]),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({ type: "delegation", summary: "ok" }),
+        expect.objectContaining({
+          type: "toolCall",
+          tool: "other",
+          status: "completed",
+        }),
+      ]);
+    });
+
+    it("opens a wait normally when no async delegation is open", () => {
+      const harness = dialectHarness("omp");
+      expect(harness.translate(waitCall("toolu_wait"))[0]).toMatchObject({
+        type: "item/started",
+        item: { type: "toolCall", tool: "other" },
+      });
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait", [completedJob("SubOk", "ok")]),
+          ),
+        ),
+      ).toEqual([expect.objectContaining({ type: "toolCall" })]);
+    });
+
+    it("closes an async delegation left open at turn end", () => {
+      const { harness } = spawned(["SubOk"]);
+      expect(
+        completedItems(harness.translate(turnCompletedEvent("end_turn"))),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "completed",
+          summary:
+            "Still running when the turn ended; the agent receives its result later.",
+        }),
+      ]);
+      expect(harness.openTurnId()).toBe("");
+    });
+
+    it("flushes a buffered call that is not a wait at turn end", () => {
+      const { harness } = spawned(["SubOk"]);
+      expect(
+        harness.translate(waitCall("toolu_todo", "Checking todos")),
+      ).toEqual([]);
+      expect(
+        completedItems(harness.translate(turnCompletedEvent("cancelled"))),
+      ).toEqual([
+        expect.objectContaining({ type: "delegation", status: "interrupted" }),
+        expect.objectContaining({ type: "toolCall", status: "interrupted" }),
+      ]);
+    });
+
+    it("flushes a buffered call as failed on a provider error", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_wait"));
+      const events = harness.translate({
+        jsonrpc: "2.0",
+        method: "error",
+        params: { threadId: THREAD_ID, message: "agent exploded" },
+      });
+      expect(events.map((event) => event.type)).toEqual([
+        "item/completed",
+        "provider/error",
+        "turn/completed",
+      ]);
+      expect(completedItems(events)).toEqual([
+        expect.objectContaining({ type: "toolCall", status: "failed" }),
+      ]);
+    });
+
+    it("emits a buffered call whose result is not a wait report", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_todo", "Checking todos"));
+      expect(
+        completedItems(
+          harness.translate(
+            updateEvent({
+              sessionUpdate: "tool_call_update",
+              toolCallId: "toolu_todo",
+              status: "completed",
+              rawOutput: {
+                content: [{ type: "text", text: "no todos" }],
+                details: {},
+              },
+            }),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "toolCall",
+          status: "completed",
+          result: expect.anything(),
+        }),
+      ]);
+    });
+
+    it("closes a sync omp task result immediately", () => {
+      const harness = dialectHarness("omp");
+      harness.translate(ompTaskCall(SINGLE_TASK));
+      expect(
+        completedItems(
+          harness.translate(
+            updateEvent({
+              sessionUpdate: "tool_call_update",
+              toolCallId: "toolu_omp_task",
+              status: "completed",
+              rawOutput: {
+                content: [{ type: "text", text: "sub-ok" }],
+                details: {
+                  results: [{ id: "SubOk", exitCode: 0 }],
+                  progress: [{ id: "SubOk", status: "completed" }],
+                },
+              },
+            }),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({ type: "delegation", status: "completed" }),
+      ]);
+    });
+  });
+
   it("keeps a bb-injected tool binding ahead of the dialect", () => {
     const harness = dialectHarness("cursor");
     harness.translator.configureInjectedTools([{ name: "AskUserQuestion" }]);

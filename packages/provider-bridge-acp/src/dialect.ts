@@ -34,6 +34,18 @@ type AcpCompactionOutcome =
   | { status: "skipped"; detail: string }
   | { status: "failed"; error: string };
 
+export interface AcpJobReport {
+  id: string;
+  status: "running" | "completed" | "failed";
+  summary?: string;
+}
+
+interface AcpAsyncJobsDialect {
+  spawnedJobIds(event: AcpToolCallUpdateEvent): string[] | undefined;
+  waitReport(event: AcpToolCallUpdateEvent): AcpJobReport[] | undefined;
+  isWaitCandidate(event: AcpToolCallUpdateEvent): boolean;
+}
+
 export interface AcpDialect {
   readonly id: string;
   toolIdentity?(event: AcpToolCallUpdateEvent): AcpToolIdentity | undefined;
@@ -47,6 +59,7 @@ export interface AcpDialect {
     params: unknown,
   ): AcpClientRequestOutcome | undefined;
   maintenance?: AcpMaintenanceDialect;
+  asyncJobs?: AcpAsyncJobsDialect;
 }
 
 export interface AcpClientRequestOutcome {
@@ -437,10 +450,97 @@ function ompClassifyToolCall(
   };
 }
 
+const ompAsyncTaskOutputSchema = z
+  .object({
+    details: z
+      .object({
+        progress: z.array(
+          z.object({ id: z.string(), status: z.string() }).passthrough(),
+        ),
+        async: z.object({ state: z.literal("running") }).passthrough(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+function ompSpawnedJobIds(event: AcpToolCallUpdateEvent): string[] | undefined {
+  const parsed = ompAsyncTaskOutputSchema.safeParse(event.rawOutput);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const ids = parsed.data.details.progress
+    .filter((entry) => entry.status === "pending" || entry.status === "running")
+    .map((entry) => entry.id);
+  return ids.length === 0 ? undefined : ids;
+}
+
+const ompWaitOutputSchema = z
+  .object({
+    details: z
+      .object({
+        op: z.literal("wait"),
+        jobs: z.array(
+          z
+            .object({
+              id: z.string(),
+              status: z.enum(["running", "completed", "failed", "cancelled"]),
+              agentUrlId: z.string().optional(),
+              resultText: z.string().optional(),
+              errorText: z.string().optional(),
+            })
+            .passthrough(),
+        ),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+const OMP_TASK_OUTPUT_PATTERN = /<output>\n?([\s\S]*?)\n?<\/output>/;
+
+function ompJobSummary(text: string | undefined): string | undefined {
+  if (text === undefined) {
+    return undefined;
+  }
+  const summary = (OMP_TASK_OUTPUT_PATTERN.exec(text)?.[1] ?? text).trim();
+  return summary.length === 0 ? undefined : summary;
+}
+
+function ompWaitReport(
+  event: AcpToolCallUpdateEvent,
+): AcpJobReport[] | undefined {
+  const parsed = ompWaitOutputSchema.safeParse(event.rawOutput);
+  if (!parsed.success) {
+    return undefined;
+  }
+  return parsed.data.details.jobs.map((job) => {
+    const summary =
+      job.status === "completed"
+        ? ompJobSummary(job.resultText)
+        : (ompJobSummary(job.errorText) ?? ompJobSummary(job.resultText));
+    return {
+      id: job.agentUrlId ?? job.id,
+      status:
+        job.status === "running" || job.status === "completed"
+          ? job.status
+          : "failed",
+      ...(summary === undefined ? {} : { summary }),
+    };
+  });
+}
+
+const ompWaitInputSchema = z.object({ i: z.string().optional() }).strict();
+
 export const OMP_ACP_DIALECT: AcpDialect = {
   id: "omp",
   commandResult: ompCommandResult,
   classifyToolCall: ompClassifyToolCall,
+  asyncJobs: {
+    spawnedJobIds: ompSpawnedJobIds,
+    waitReport: ompWaitReport,
+    isWaitCandidate: (event) =>
+      event.kind === "other" &&
+      ompWaitInputSchema.safeParse(event.rawInput).success,
+  },
 };
 
 const openCodeCommandRawOutputSchema = z
