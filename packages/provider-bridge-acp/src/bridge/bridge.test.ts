@@ -238,6 +238,7 @@ interface StartThreadArgs extends AgentLaunchArgs {
   reasoningLevel?: ReasoningLevel;
   serviceTier?: "default" | "fast";
   additionalWorkspaceWriteRoots?: string[];
+  elicitation?: boolean;
 }
 
 async function startThread(args?: StartThreadArgs): Promise<{
@@ -257,6 +258,7 @@ async function startThread(args?: StartThreadArgs): Promise<{
         ...(args?.parameterizedModelPicker === true
           ? { parameterizedModelPicker: true }
           : {}),
+        ...(args?.elicitation === true ? { elicitation: true } : {}),
         ...(args?.reasoningProbePriorityModelIds
           ? {
               reasoningProbePriorityModelIds:
@@ -1350,10 +1352,11 @@ describe("acp bridge", () => {
     expect(agentMessageTexts()).toContain("selected-model:fake/strong");
   });
 
-  it("falls back to session/set_model when the model config option errors", async () => {
+  it("falls back to session/set_model when the model config option errors and the agent advertises session models", async () => {
     const { providerThreadId } = await startThread({
       envVars: {
         FAKE_ACP_MODEL_CONFIG: "1",
+        FAKE_ACP_MODELS_FIELD: "1",
         FAKE_ACP_SET_CONFIG_MODEL_ERROR: "1",
       },
       model: "fake/strong",
@@ -1365,6 +1368,37 @@ describe("acp bridge", () => {
     await waitForTurnCompleted();
 
     expect(agentMessageTexts()).toContain("selected-model:fake/strong");
+  });
+
+  it("surfaces the model config option error without session/set_model when the agent advertises no session models", async () => {
+    const requestLog = join(workspaceDir, "model-config-error-requests.jsonl");
+    await expect(
+      startThread({
+        envVars: {
+          FAKE_ACP_MODEL_CONFIG: "1",
+          FAKE_ACP_SET_CONFIG_MODEL_ERROR: "1",
+          FAKE_ACP_REQUEST_LOG: requestLog,
+        },
+        model: "fake/strong",
+      }),
+    ).rejects.toThrow(/model config probe failed/u);
+
+    expect(
+      loggedAcpRequests(requestLog).map((request) => request.method),
+    ).not.toContain("session/set_model");
+  });
+
+  it("reports the model config option error when the session/set_model fallback also fails", async () => {
+    await expect(
+      startThread({
+        envVars: {
+          FAKE_ACP_MODEL_CONFIG: "1",
+          FAKE_ACP_MODELS_FIELD: "1",
+          FAKE_ACP_SET_CONFIG_MODEL_ERROR: "1",
+        },
+        model: "fake/missing",
+      }),
+    ).rejects.toThrow(/model config probe failed/u);
   });
 
   it("selects ACP-native models from session models state", async () => {
@@ -1397,6 +1431,40 @@ describe("acp bridge", () => {
     await waitForTurnCompleted();
 
     expect(agentMessageTexts()).toContain("selected-effort:xhigh");
+  });
+
+  it("fails session construction when a requested reasoning level is rejected", async () => {
+    await expect(
+      startThread({
+        envVars: {
+          FAKE_ACP_MODEL_CONFIG: "1",
+          FAKE_ACP_THOUGHT_LEVEL_CONFIG: "1",
+          FAKE_ACP_SET_CONFIG_EFFORT_ERROR: "1",
+        },
+        model: "fake/strong",
+        reasoningLevel: "max",
+      }),
+    ).rejects.toThrow(/effort config update failed/u);
+  });
+
+  it("starts the session when the agent rejects a configured native reasoning option it never advertised", async () => {
+    const { providerThreadId } = await startThread({
+      envVars: { FAKE_ACP_MODEL_CONFIG: "1" },
+      model: "fake/strong",
+      reasoningLevel: "max",
+      nativeReasoning: {
+        configId: "reasoning_effort",
+        supportedLevels: ["none", "low", "medium", "high", "xhigh", "max"],
+        defaultLevel: "medium",
+      },
+    });
+
+    sendTurnRequest("turn/start", providerThreadId, {
+      input: [{ type: "text", text: "hello", mentions: [] }],
+    });
+    expect(await waitForTurnCompleted()).toMatchObject({
+      status: "completed",
+    });
   });
 
   it("applies configured native reasoning when the ACP agent does not advertise thought_level", async () => {
@@ -1597,6 +1665,164 @@ describe("acp bridge", () => {
     expect(threadEventsOfType("turn/started")).toHaveLength(1);
     expect(agentMessageTexts()).toContain("echo:hello there");
   });
+
+  it("serves advertised available_commands_update via thread/commands", async () => {
+    async function threadCommands(
+      bbThreadId: string,
+      providerThreadId: string,
+    ) {
+      const id = sendRequest("thread/commands", {
+        threadId: bbThreadId,
+        providerThreadId,
+      });
+      return (await waitForResponse(id)).result as {
+        commands: unknown;
+        advertised: unknown;
+      };
+    }
+
+    const { bbThreadId, providerThreadId } = await startThread();
+    expect(await threadCommands(bbThreadId, providerThreadId)).toEqual({
+      commands: [],
+      advertised: false,
+    });
+
+    const turnId = sendTurnRequest("turn/start", providerThreadId, {
+      input: [{ type: "text", text: "advertise-commands", mentions: [] }],
+    });
+    await waitForResponse(turnId);
+    await waitForTurnCompleted();
+
+    expect(agentMessageTexts()).toContain("echo:advertise-commands");
+    expect(notifications("thread/commands/updated").at(-1)?.params).toEqual({
+      threadId: bbThreadId,
+      commands: [
+        {
+          name: "ui-check",
+          description: "Run UI verification checks",
+          argumentHint: "<fixture>",
+        },
+        {
+          name: "jobs",
+          description: "List background jobs",
+          argumentHint: null,
+        },
+      ],
+    });
+    expect(await threadCommands(bbThreadId, providerThreadId)).toEqual({
+      commands: [
+        {
+          name: "ui-check",
+          description: "Run UI verification checks",
+          argumentHint: "<fixture>",
+        },
+        {
+          name: "jobs",
+          description: "List background jobs",
+          argumentHint: null,
+        },
+      ],
+      advertised: true,
+    });
+  }, 30_000);
+
+  it("scopes advertised commands per thread", async () => {
+    const first = await startThread();
+    const second = await startThread();
+
+    async function threadCommands(
+      bbThreadId: string,
+      providerThreadId: string,
+    ) {
+      const id = sendRequest("thread/commands", {
+        threadId: bbThreadId,
+        providerThreadId,
+      });
+      return (await waitForResponse(id)).result as {
+        commands: unknown;
+      };
+    }
+
+    const turnId = sendTurnRequest("turn/start", first.providerThreadId, {
+      input: [{ type: "text", text: "advertise-commands", mentions: [] }],
+    });
+    await waitForResponse(turnId);
+    await waitForTurnCompleted();
+
+    expect(
+      (await threadCommands(first.bbThreadId, first.providerThreadId)).commands,
+    ).not.toEqual([]);
+    expect(
+      (await threadCommands(second.bbThreadId, second.providerThreadId))
+        .commands,
+    ).toEqual([]);
+    expect(
+      (await threadCommands("thread-unknown", "sess-unknown")).commands,
+    ).toEqual([]);
+  }, 30_000);
+
+  it("replaces advertised commands on an empty update", async () => {
+    const { bbThreadId, providerThreadId } = await startThread();
+
+    async function threadCommands() {
+      const id = sendRequest("thread/commands", {
+        threadId: bbThreadId,
+        providerThreadId,
+      });
+      return (await waitForResponse(id)).result as {
+        commands: unknown;
+        advertised: unknown;
+      };
+    }
+
+    async function sendAdvertiseTurn(text: string): Promise<void> {
+      const turnId = sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text, mentions: [] }],
+      });
+      await waitForResponse(turnId);
+      await waitFor(
+        () => (agentMessageTexts().includes(`echo:${text}`) ? true : undefined),
+        `echo for ${text}`,
+      );
+      await waitForTurnCompleted();
+    }
+
+    await sendAdvertiseTurn("advertise-commands");
+    expect(await threadCommands()).toEqual({
+      commands: expect.any(Array),
+      advertised: true,
+    });
+
+    await sendAdvertiseTurn("advertise-commands-empty");
+    expect(await threadCommands()).toEqual({ commands: [], advertised: true });
+  }, 30_000);
+
+  it("drops malformed advertised commands and keeps exact spellings", async () => {
+    const { bbThreadId, providerThreadId } = await startThread();
+    const turnId = sendTurnRequest("turn/start", providerThreadId, {
+      input: [
+        { type: "text", text: "advertise-commands-malformed", mentions: [] },
+      ],
+    });
+    await waitForResponse(turnId);
+    await waitForTurnCompleted();
+
+    const id = sendRequest("thread/commands", {
+      threadId: bbThreadId,
+      providerThreadId,
+    });
+    expect((await waitForResponse(id)).result).toEqual({
+      commands: [
+        { name: "good", description: "Well formed", argumentHint: null },
+        {
+          name: "slashy",
+          description: "Leading slash",
+          argumentHint: "<target>",
+        },
+      ],
+      advertised: true,
+    });
+  }, 30_000);
 
   it("rebuilds the agent with environment from a later turn", async () => {
     const envVars = { FAKE_ACP_LOAD_SESSION: "1", FAKE_ACP_PROMPT_ERROR: "1" };
@@ -2229,6 +2455,37 @@ describe("acp bridge", () => {
     expect(agentMessageTexts()).toContain("permission:no");
   });
 
+  it("withdraws a forwarded permission request when the turn is interrupted", async () => {
+    const { providerThreadId } = await startThread({
+      permissionMode: "accept-edits",
+      permissionEscalation: "ask",
+    });
+    const turnId = sendTurnRequest("turn/start", providerThreadId, {
+      input: [{ type: "text", text: "request-permission", mentions: [] }],
+    });
+    await waitForResponse(turnId);
+    const forwarded = await waitFor(
+      () =>
+        output.messages.find(
+          (message) =>
+            message.method === "interaction/request" &&
+            message.id !== undefined,
+        ),
+      "forwarded permission request",
+    );
+
+    await stopThread(providerThreadId);
+
+    expect(
+      output.messages.filter(
+        (message) => message.method === "notifications/cancelled",
+      ),
+    ).toEqual([
+      expect.objectContaining({ params: { requestId: forwarded.id } }),
+    ]);
+    startedProviderThreadIds.pop();
+  });
+
   it("presents an external-directory write permission as a file-change approval", async () => {
     const { providerThreadId } = await startThread({
       permissionMode: "accept-edits",
@@ -2301,6 +2558,403 @@ describe("acp bridge", () => {
     );
     await waitForTurnCompleted();
     expect(agentMessageTexts()).toContain("permission:always");
+  });
+
+  describe("elicitation/create", () => {
+    const PLAN_ELICITATION = {
+      message:
+        'Approve plan "Add cache" and start implementation?\n\n# Add cache\n\n1. Wrap fetch',
+      requestedSchema: {
+        type: "object",
+        properties: {
+          value: {
+            type: "string",
+            enum: ["Approve and execute", "Refine plan"],
+          },
+        },
+        required: ["value"],
+      },
+    };
+
+    async function forwardElicitation(
+      elicitation: object,
+      args: StartThreadArgs & { prompt?: string } = {},
+    ): Promise<BridgeJsonRpcOutputMessage> {
+      const { prompt, ...startArgs } = args;
+      const { providerThreadId } = await startThread({
+        elicitation: true,
+        ...startArgs,
+        envVars: {
+          FAKE_ACP_ELICITATION: JSON.stringify(elicitation),
+          ...startArgs.envVars,
+        },
+      });
+      const turnId = sendTurnRequest("turn/start", providerThreadId, {
+        input: [
+          { type: "text", text: prompt ?? "request-elicitation", mentions: [] },
+        ],
+      });
+      await waitForResponse(turnId);
+      return waitFor(
+        () =>
+          output.messages.find(
+            (message) =>
+              message.method === "interaction/request" &&
+              message.id !== undefined,
+          ),
+        "forwarded elicitation",
+      );
+    }
+
+    function answer(forwarded: BridgeJsonRpcOutputMessage, result: object) {
+      handleLine(JSON.stringify({ jsonrpc: "2.0", id: forwarded.id, result }));
+    }
+
+    async function agentReceived(): Promise<unknown> {
+      await waitForTurnCompleted();
+      const text = agentMessageTexts().find((entry) =>
+        entry.startsWith("elicitation:"),
+      );
+      return text === undefined
+        ? undefined
+        : JSON.parse(text.slice("elicitation:".length));
+    }
+
+    it("advertises the form capability only for opted-in agents", async () => {
+      const requestLog = join(workspaceDir, "acp-requests.jsonl");
+      await startThread({
+        elicitation: true,
+        envVars: { FAKE_ACP_REQUEST_LOG: requestLog },
+      });
+      await startThread({ envVars: { FAKE_ACP_REQUEST_LOG: requestLog } });
+
+      const capabilities = loggedAcpRequests(requestLog)
+        .filter((request) => request.method === "initialize")
+        .map((request) => request.params?.clientCapabilities);
+      expect(capabilities).toEqual([
+        {
+          fs: { readTextFile: true, writeTextFile: true },
+          terminal: false,
+          elicitation: { form: {} },
+        },
+        { fs: { readTextFile: true, writeTextFile: true }, terminal: false },
+      ]);
+    });
+
+    it("rejects elicitation from agents that did not opt in", async () => {
+      const { providerThreadId } = await startThread({
+        envVars: { FAKE_ACP_ELICITATION: JSON.stringify(PLAN_ELICITATION) },
+      });
+      sendTurnRequest("turn/start", providerThreadId, {
+        input: [{ type: "text", text: "request-elicitation", mentions: [] }],
+      });
+
+      expect(await agentReceived()).toEqual({
+        error: 'Unsupported ACP client method "elicitation/create"',
+      });
+      expect(notifications("interaction/request")).toHaveLength(0);
+    });
+
+    it("asks a single-select question with free text and a recommended default", async () => {
+      const forwarded = await forwardElicitation({
+        message: "Which database?",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            q0: {
+              type: "string",
+              title: "Which database?",
+              description: "Storage",
+              oneOf: [
+                { const: "SQLite", title: "SQLite" },
+                { const: "Postgres", title: "Postgres", description: "Server" },
+              ],
+              default: "Postgres",
+            },
+            q0__other: { type: "string", title: "Other (type your own)" },
+          },
+        },
+      });
+      expect(forwarded.params).toMatchObject({
+        turnId: null,
+        payload: {
+          kind: "user_question",
+          questions: [
+            {
+              id: "q0",
+              prompt: "Which database?",
+              shortLabel: "Storage",
+              multiSelect: false,
+              allowFreeText: true,
+              options: [
+                { value: "SQLite", label: "SQLite" },
+                {
+                  value: "Postgres",
+                  label: "Postgres (recommended)",
+                  description: "Server",
+                },
+              ],
+            },
+          ],
+        },
+      });
+
+      answer(forwarded, {
+        kind: "user_answer",
+        answers: { q0: { selected: ["Postgres"] } },
+      });
+
+      expect(await agentReceived()).toEqual({
+        action: "accept",
+        content: { q0: "Postgres" },
+      });
+    });
+
+    it("asks multi-select and other-text questions in one interaction", async () => {
+      const forwarded = await forwardElicitation({
+        message: "Answer 2 questions",
+        requestedSchema: {
+          type: "object",
+          properties: {
+            q0: {
+              type: "array",
+              title: "Which targets?",
+              items: {
+                anyOf: [
+                  { const: "linux", title: "linux" },
+                  { const: "mac", title: "mac" },
+                  { const: "windows", title: "windows" },
+                ],
+              },
+            },
+            q0__other: { type: "string", title: "Other (type your own)" },
+            q1: {
+              type: "string",
+              title: "Which shell?",
+              oneOf: [{ const: "bash", title: "bash" }],
+            },
+            q1__other: { type: "string", title: "Other (type your own)" },
+          },
+        },
+      });
+      expect(forwarded.params).toMatchObject({
+        payload: {
+          kind: "user_question",
+          questions: [
+            { id: "q0", prompt: "Which targets?", multiSelect: true },
+            { id: "q1", prompt: "Which shell?", multiSelect: false },
+          ],
+        },
+      });
+
+      answer(forwarded, {
+        kind: "user_answer",
+        answers: {
+          q0: { selected: ["linux", "windows"] },
+          q1: { selected: [], freeText: "fish" },
+        },
+      });
+
+      expect(await agentReceived()).toEqual({
+        action: "accept",
+        content: { q0: ["linux", "windows"], q1__other: "fish" },
+      });
+    });
+
+    it("asks a confirm as a yes/no question and answers a boolean", async () => {
+      const forwarded = await forwardElicitation({
+        message: "Coding-plan reserve reached\n\nSwitch to the fallback plan?",
+        requestedSchema: {
+          type: "object",
+          properties: { value: { type: "boolean" } },
+          required: ["value"],
+        },
+      });
+      expect(forwarded.params).toMatchObject({
+        payload: {
+          kind: "user_question",
+          questions: [
+            {
+              id: "value",
+              prompt:
+                "Coding-plan reserve reached\n\nSwitch to the fallback plan?",
+              multiSelect: false,
+              allowFreeText: false,
+              options: [
+                { value: "true", label: "Yes" },
+                { value: "false", label: "No" },
+              ],
+            },
+          ],
+        },
+      });
+
+      answer(forwarded, {
+        kind: "user_answer",
+        answers: { value: { selected: ["false"] } },
+      });
+
+      expect(await agentReceived()).toEqual({
+        action: "accept",
+        content: { value: false },
+      });
+    });
+
+    it("asks more than four questions as sequential interactions", async () => {
+      const properties = Object.fromEntries(
+        [0, 1, 2, 3, 4].map((index) => [
+          `q${index}`,
+          { type: "string", title: `Question ${index}` },
+        ]),
+      );
+      const first = await forwardElicitation({
+        message: "Answer 5 questions",
+        requestedSchema: { type: "object", properties },
+      });
+      answer(first, {
+        kind: "user_answer",
+        answers: {
+          q0: { selected: [], freeText: "a" },
+          q3: { selected: [], freeText: "d" },
+        },
+      });
+      const second = await waitFor(
+        () =>
+          notifications("interaction/request").find(
+            (message) => message.id !== first.id,
+          ),
+        "second question batch",
+      );
+      expect(second.params).toMatchObject({
+        payload: { questions: [{ id: "q4", prompt: "Question 4" }] },
+      });
+      answer(second, {
+        kind: "user_answer",
+        answers: { q4: { selected: [], freeText: "e" } },
+      });
+
+      expect(await agentReceived()).toEqual({
+        action: "accept",
+        content: { q0: "a", q3: "d", q4: "e" },
+      });
+    });
+
+    it("keeps earlier batch answers when a later batch is submitted empty", async () => {
+      const properties = Object.fromEntries(
+        [0, 1, 2, 3, 4].map((index) => [
+          `q${index}`,
+          { type: "string", title: `Question ${index}` },
+        ]),
+      );
+      const first = await forwardElicitation({
+        message: "Answer 5 questions",
+        requestedSchema: { type: "object", properties },
+      });
+      answer(first, {
+        kind: "user_answer",
+        answers: { q0: { selected: [], freeText: "a" } },
+      });
+      const second = await waitFor(
+        () =>
+          notifications("interaction/request").find(
+            (message) => message.id !== first.id,
+          ),
+        "second question batch",
+      );
+      answer(second, { kind: "user_answer", answers: {} });
+
+      expect(await agentReceived()).toEqual({
+        action: "accept",
+        content: { q0: "a" },
+      });
+    });
+
+    it("declines when the user submits no answers", async () => {
+      const forwarded = await forwardElicitation({
+        message: "Name?",
+        requestedSchema: {
+          type: "object",
+          properties: { value: { type: "string" } },
+          required: ["value"],
+        },
+      });
+      answer(forwarded, { kind: "user_answer", answers: {} });
+
+      expect(await agentReceived()).toEqual({ action: "decline" });
+    });
+
+    it("routes plan approval to plan review even in full permission mode", async () => {
+      const forwarded = await forwardElicitation(PLAN_ELICITATION, {
+        permissionMode: "full",
+      });
+      expect(forwarded.params).toMatchObject({
+        turnId: null,
+        payload: {
+          kind: "approval",
+          subject: {
+            kind: "plan",
+            plan: "# Add cache\n\n1. Wrap fetch",
+            planFilePath: null,
+          },
+          reason: 'Approve plan "Add cache" and start implementation?',
+          availableDecisions: ["allow_once", "deny"],
+        },
+      });
+
+      answer(forwarded, { decision: "allow_once", grantedPermissions: null });
+
+      expect(await agentReceived()).toEqual({
+        action: "accept",
+        content: { value: "Approve and execute" },
+      });
+    });
+
+    it("answers a denied plan review with Refine plan", async () => {
+      const forwarded = await forwardElicitation(PLAN_ELICITATION, {
+        permissionMode: "accept-edits",
+        permissionEscalation: "ask",
+      });
+      answer(forwarded, { decision: "deny" });
+
+      expect(await agentReceived()).toEqual({
+        action: "accept",
+        content: { value: "Refine plan" },
+      });
+    });
+
+    it("cancels an open elicitation when the turn ends and ignores the late answer", async () => {
+      const elicitationLog = join(workspaceDir, "elicitation.jsonl");
+      const forwarded = await forwardElicitation(PLAN_ELICITATION, {
+        prompt: "request-elicitation-detached",
+        envVars: { FAKE_ACP_ELICITATION_LOG: elicitationLog },
+      });
+      await waitForTurnCompleted();
+      await waitFor(
+        () => (existsSync(elicitationLog) ? true : undefined),
+        "elicitation answer log",
+      );
+
+      answer(forwarded, { decision: "allow_once", grantedPermissions: null });
+      sendTurnRequest("turn/start", startedProviderThreadIds.at(-1) ?? "", {
+        input: [{ type: "text", text: "after", mentions: [] }],
+      });
+      await waitFor(
+        () =>
+          threadEventsOfType("turn/completed").length === 2 ? true : undefined,
+        "second turn/completed",
+      );
+
+      expect(
+        readFileSync(elicitationLog, "utf8").split("\n").filter(Boolean),
+      ).toEqual([JSON.stringify({ action: "cancel" })]);
+      expect(
+        output.messages.filter(
+          (message) => message.method === "notifications/cancelled",
+        ),
+      ).toEqual([
+        expect.objectContaining({ params: { requestId: forwarded.id } }),
+      ]);
+    });
   });
 
   it.each(["add", "update"])("acknowledges fs %s writes", async (kind) => {
@@ -3282,6 +3936,58 @@ describe("acp bridge", () => {
     startedProviderThreadIds.push(result.providerThreadId);
   });
 
+  it("reports the agent's session/load error when a cwd change prevents restore", async () => {
+    const first = await startThread({
+      envVars: { FAKE_ACP_LOAD_SESSION: "1" },
+    });
+    await stopThread(first.providerThreadId);
+    startedProviderThreadIds.pop();
+    const movedDir = mkdtempSync(join(tmpdir(), "bb-acp-moved-"));
+    const stderrWrite = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation(() => true);
+
+    try {
+      const resumeId = sendRequest("thread/resume", {
+        threadId: first.bbThreadId,
+        cwd: movedDir,
+        instructionMode: "append",
+        options: executionOptions({
+          providerOptions: {
+            acpLaunchSpec: acpLaunchSpec({
+              envVars: {
+                FAKE_ACP_LOAD_SESSION: "1",
+                FAKE_ACP_LOAD_REQUIRE_CWD: workspaceDir,
+              },
+            }),
+          },
+        }),
+        providerThreadId: first.providerThreadId,
+      });
+      const result = (await waitForResponse(resumeId)).result as
+        | { providerThreadId?: unknown }
+        | undefined;
+      if (typeof result?.providerThreadId !== "string") {
+        throw new Error("thread/resume did not return a providerThreadId");
+      }
+      startedProviderThreadIds.push(result.providerThreadId);
+      expect(result.providerThreadId).not.toBe(first.providerThreadId);
+
+      const agentError = `ACP session load was cancelled: ${first.providerThreadId}`;
+      expect(threadEventsOfType("provider/warning")).toEqual([
+        expect.objectContaining({
+          details: expect.stringContaining(agentError),
+        }),
+      ]);
+      expect(
+        stderrWrite.mock.calls.map(([chunk]) => String(chunk)),
+      ).toContainEqual(expect.stringContaining(agentError));
+    } finally {
+      stderrWrite.mockRestore();
+      rmSync(movedDir, { recursive: true, force: true });
+    }
+  });
+
   it("re-applies ACP-native reasoning after session/load resume", async () => {
     const first = await startThread({
       envVars: {
@@ -3325,6 +4031,63 @@ describe("acp bridge", () => {
     await waitForTurnCompleted();
 
     expect(agentMessageTexts()).toContain("selected-effort:high");
+  });
+
+  it("publishes commands advertised during session/load after the config step", async () => {
+    const envVars = {
+      FAKE_ACP_LOAD_SESSION: "1",
+      FAKE_ACP_MODEL_CONFIG: "1",
+    };
+    const first = await startThread({ envVars });
+    await stopThread(first.providerThreadId);
+    startedProviderThreadIds.pop();
+    const commandsBeforeResume = notifications(
+      "thread/commands/updated",
+    ).length;
+
+    const resumeId = sendRequest("thread/resume", {
+      threadId: first.bbThreadId,
+      cwd: workspaceDir,
+      instructionMode: "append",
+      options: executionOptions({
+        model: "fake/strong",
+        providerOptions: {
+          acpLaunchSpec: acpLaunchSpec({
+            envVars: {
+              ...envVars,
+              FAKE_ACP_COMMANDS_DURING_LOAD_CONFIG: "1",
+            },
+          }),
+        },
+      }),
+      providerThreadId: first.providerThreadId,
+    });
+    const response = await waitForResponse(resumeId);
+    expect(response.result).toEqual({
+      providerThreadId: first.providerThreadId,
+      sessionRestorable: true,
+    });
+    startedProviderThreadIds.push(first.providerThreadId);
+
+    const jobs = {
+      name: "jobs",
+      description: "List background jobs",
+      argumentHint: null,
+    };
+    expect(
+      notifications("thread/commands/updated")
+        .slice(commandsBeforeResume)
+        .map((notification) => notification.params),
+    ).toEqual([{ threadId: first.bbThreadId, commands: [jobs] }]);
+    const commandsId = sendRequest("thread/commands", {
+      threadId: first.bbThreadId,
+      providerThreadId: first.providerThreadId,
+    });
+    expect((await waitForResponse(commandsId)).result).toEqual({
+      commands: [jobs],
+      advertised: true,
+    });
+    expect(agentMessageTexts()).not.toContain("replayed-history");
   });
 
   it("falls back to a fresh session with a warning when load is unsupported", async () => {

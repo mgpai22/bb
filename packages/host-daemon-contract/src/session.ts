@@ -432,6 +432,7 @@ const hostDaemonOnlineRpcResponseSuccessSchema = z.discriminatedUnion(
     onlineRpcResponseSuccessSchemaFor("connect-tunnel.ensure-identity"),
     onlineRpcResponseSuccessSchemaFor("host.list_commands"),
     onlineRpcResponseSuccessSchemaFor("host.list_skills"),
+    onlineRpcResponseSuccessSchemaFor("thread.commands"),
     onlineRpcResponseSuccessSchemaFor("host.delete_skill"),
     onlineRpcResponseSuccessSchemaFor("host.write_skill"),
     onlineRpcResponseSuccessSchemaFor("host.install_global_skills"),
@@ -828,6 +829,8 @@ export const hostDaemonInteractiveInterruptRequestSchema = z.object({
   providerId: z.string().min(1),
   threadIds: z.array(z.string().min(1)).min(1),
   reason: z.string().min(1),
+  /** Interrupt only this interaction; omitted interrupts every provider interaction on the threads. */
+  interactionId: z.string().min(1).optional(),
 });
 export type HostDaemonInteractiveInterruptRequest = z.infer<
   typeof hostDaemonInteractiveInterruptRequestSchema

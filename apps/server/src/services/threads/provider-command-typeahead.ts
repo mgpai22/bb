@@ -92,6 +92,7 @@ function compareCommands(a: ProviderCommand, b: ProviderCommand): number {
 
 interface BuildCommandListResponseArgs {
   commands: HostProviderCommand[];
+  advertisedCommands?: HostProviderCommand[];
   includeBuiltinCompact: boolean;
   skillCatalog: readonly ResolvedSkillCatalogEntry[];
 }
@@ -99,12 +100,23 @@ interface BuildCommandListResponseArgs {
 export function buildCommandListResponse(
   args: BuildCommandListResponseArgs,
 ): CommandListResponse {
+  const skillCommands = args.skillCatalog.map(toSkillCommand);
+  const skillNames = new Set(skillCommands.map((command) => command.name));
   return {
     commands: dedupeBySourceAndName([
       ...BUILT_IN_PROVIDER_COMMANDS.filter(
         (command) => command.name !== "compact" || args.includeBuiltinCompact,
       ),
-      ...args.skillCatalog.map(toSkillCommand),
+      ...skillCommands,
+      ...(args.advertisedCommands ?? [])
+        .filter(
+          (command) =>
+            !(
+              command.name.startsWith("skill:") &&
+              skillNames.has(command.name.slice("skill:".length))
+            ),
+        )
+        .map(toProviderCommand),
       ...args.commands.map(toProviderCommand),
     ]).sort(compareCommands),
   };

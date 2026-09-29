@@ -10,6 +10,8 @@
  * Env knobs (passed by tests through thread/start envVars):
  * - FAKE_ACP_LOAD_SESSION=1  → advertise + accept session/load
  * - FAKE_ACP_FAIL_LOAD=1     → advertise session/load, then fail it
+ * - FAKE_ACP_LOAD_REQUIRE_CWD → fail session/load like omp acp when the
+ *                            request cwd differs from this stored cwd
  * - FAKE_ACP_FORK_SESSION=1  → advertise + accept session/fork
  * - FAKE_ACP_FORK_LOG        → write the session/fork params as JSON
  * - FAKE_ACP_FORK_REUSE_SOURCE_ID=1
@@ -17,6 +19,11 @@
  * - FAKE_ACP_USAGE_ON_LOAD=1 → report context usage during session/load
  * - FAKE_ACP_USAGE_SESSION_ID
  *                            → override the usage notification session id
+ * - FAKE_ACP_COMMANDS_DURING_LOAD_CONFIG=1
+ *                            → after session/load, advertise commands and
+ *                              replay a message chunk before answering the
+ *                              next session/set_config_option, like omp acp's
+ *                              bootstrap advertisement during bb's config step
  * - FAKE_ACP_MODEL_LINES     → stdout for the agent's `--list-models` mode
  * - FAKE_ACP_MODEL_LIST_STDERR
  *                            → make `--list-models` fail with this stderr
@@ -36,6 +43,8 @@
  *                            → fail session/set_config_option for one model
  * - FAKE_ACP_SET_CONFIG_FAST_ERROR=1
  *                            → fail session/set_config_option for Fast values
+ * - FAKE_ACP_SET_CONFIG_EFFORT_ERROR=1
+ *                            → fail session/set_config_option for effort values
  * - FAKE_ACP_CURSOR_PARAMETERIZED_MODELS=1
  *                            → mirror Cursor compatibility-vs-parameterized
  *                              model/config-option responses
@@ -67,6 +76,11 @@
  * - FAKE_ACP_PROMPT_ERROR=1  → reject every session/prompt request
  * - FAKE_ACP_GROK_CONTEXT=1  → advertise Grok model _meta.totalContextTokens
  *                              and prompt-result _meta.usage
+ * - FAKE_ACP_ELICITATION     → JSON `{message, requestedSchema}` sent as a form
+ *                              `elicitation/create` by the "request-elicitation"
+ *                              prompts
+ * - FAKE_ACP_ELICITATION_LOG → "request-elicitation-detached" ends the turn
+ *                              without waiting and appends the late answer here
  * - FAKE_ACP_COMPACT_STOP_REASON
  *                            → stop reason returned for /compact
  */
@@ -80,6 +94,10 @@ const forkSession = process.env.FAKE_ACP_FORK_SESSION === "1";
 const forkReuseSourceId = process.env.FAKE_ACP_FORK_REUSE_SOURCE_ID === "1";
 const usageOnLoad = process.env.FAKE_ACP_USAGE_ON_LOAD === "1";
 const usageSessionId = process.env.FAKE_ACP_USAGE_SESSION_ID;
+const loadRequireCwd = process.env.FAKE_ACP_LOAD_REQUIRE_CWD;
+const commandsDuringLoadConfig =
+  process.env.FAKE_ACP_COMMANDS_DURING_LOAD_CONFIG === "1";
+let loadConfigAdvertisementPending = false;
 const modelConfig = process.env.FAKE_ACP_MODEL_CONFIG === "1";
 const modelsField = process.env.FAKE_ACP_MODELS_FIELD === "1";
 const thoughtLevelConfig = process.env.FAKE_ACP_THOUGHT_LEVEL_CONFIG === "1";
@@ -92,6 +110,8 @@ const setConfigModelError = process.env.FAKE_ACP_SET_CONFIG_MODEL_ERROR === "1";
 const setConfigModelErrorValue =
   process.env.FAKE_ACP_SET_CONFIG_MODEL_ERROR_VALUE;
 const setConfigFastError = process.env.FAKE_ACP_SET_CONFIG_FAST_ERROR === "1";
+const setConfigEffortError =
+  process.env.FAKE_ACP_SET_CONFIG_EFFORT_ERROR === "1";
 const cursorParameterizedModels =
   process.env.FAKE_ACP_CURSOR_PARAMETERIZED_MODELS === "1";
 const requestLog = process.env.FAKE_ACP_REQUEST_LOG;
@@ -407,6 +427,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function elicitationParams() {
+  return {
+    mode: "form",
+    sessionId: activeSessionId,
+    ...JSON.parse(process.env.FAKE_ACP_ELICITATION ?? "{}"),
+  };
+}
+
+function logElicitation(outcome) {
+  appendFileSync(
+    process.env.FAKE_ACP_ELICITATION_LOG,
+    `${JSON.stringify(outcome)}\n`,
+  );
+}
+
 function promptText(prompt) {
   return (Array.isArray(prompt) ? prompt : [])
     .filter((block) => block && block.type === "text")
@@ -521,6 +556,21 @@ async function handlePrompt(message) {
       outcome = "error";
     }
     notifyUpdate(messageChunk(`permission:${outcome}`));
+  } else if (text.includes("request-elicitation-detached")) {
+    // OMP's ask/plan dialog timed out locally: the elicitation stays open on
+    // the client while the turn ends. The late answer goes to a log file.
+    requestClient("elicitation/create", elicitationParams()).then(
+      (result) => logElicitation(result),
+      (error) => logElicitation({ error: error.message }),
+    );
+  } else if (text.includes("request-elicitation")) {
+    let outcome;
+    try {
+      outcome = await requestClient("elicitation/create", elicitationParams());
+    } catch (error) {
+      outcome = { error: error.message };
+    }
+    notifyUpdate(messageChunk(`elicitation:${JSON.stringify(outcome)}`));
   } else if (text.includes("write-file")) {
     try {
       const result = await requestClient("fs/write_text_file", {
@@ -570,10 +620,45 @@ async function handlePrompt(message) {
     notifyUpdate(
       messageChunk(`mcp-server-config:${JSON.stringify(currentMcpServers)}`),
     );
+  } else if (text.includes("advertise-commands-empty")) {
+    notifyUpdate({
+      sessionUpdate: "available_commands_update",
+      availableCommands: [],
+    });
+    notifyUpdate(messageChunk(`echo:${text}`));
+  } else if (text.includes("advertise-commands-malformed")) {
+    notifyUpdate({
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        { name: "good", description: "Well formed", input: { hint: 42 } },
+        { description: "Missing name" },
+        { name: "" },
+        { name: "has space" },
+        42,
+        {
+          name: "/slashy",
+          description: "Leading slash",
+          input: { hint: "<target>" },
+        },
+      ],
+    });
+    notifyUpdate(messageChunk(`echo:${text}`));
+  } else if (text.includes("advertise-commands")) {
+    notifyUpdate({
+      sessionUpdate: "available_commands_update",
+      availableCommands: [
+        {
+          name: "ui-check",
+          description: "Run UI verification checks",
+          input: { hint: "<fixture>" },
+        },
+        { name: "jobs", description: "List background jobs" },
+      ],
+    });
+    notifyUpdate(messageChunk(`echo:${text}`));
   } else {
     notifyUpdate(messageChunk(`echo:${text}`));
   }
-
   if (activePromptId === message.id) {
     activePromptId = null;
     const stopReason =
@@ -691,8 +776,25 @@ async function handleMessage(message) {
             id: message.id,
             error: { code: -32000, message: "session/load failed" },
           });
+        } else if (
+          loadRequireCwd !== undefined &&
+          message.params?.cwd !== loadRequireCwd
+        ) {
+          // omp acp rejects restoring a stored session under a different cwd.
+          send({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: -32603,
+              message: "Internal error",
+              data: {
+                details: `ACP session load was cancelled: ${message.params?.sessionId}`,
+              },
+            },
+          });
         } else {
           activeSessionId = message.params?.sessionId;
+          loadConfigAdvertisementPending = commandsDuringLoadConfig;
           send({ jsonrpc: "2.0", id: message.id, result: configState() });
         }
       } else {
@@ -754,6 +856,16 @@ async function handleMessage(message) {
     case "session/set_config_option": {
       const configId = message.params?.configId;
       const value = message.params?.value;
+      if (loadConfigAdvertisementPending) {
+        loadConfigAdvertisementPending = false;
+        notifyUpdate(messageChunk("replayed-history"));
+        notifyUpdate({
+          sessionUpdate: "available_commands_update",
+          availableCommands: [
+            { name: "jobs", description: "List background jobs" },
+          ],
+        });
+      }
       if (configId === "model") {
         if (setConfigModelError || value === setConfigModelErrorValue) {
           send({
@@ -783,6 +895,14 @@ async function handleMessage(message) {
         return;
       }
       if (configId === "effort") {
+        if (setConfigEffortError) {
+          send({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: { code: -32603, message: "effort config update failed" },
+          });
+          return;
+        }
         const efforts = cursorParameterizedModels
           ? ["low", "medium", "high", "xhigh"]
           : effortsByModel.get(selectedModel);

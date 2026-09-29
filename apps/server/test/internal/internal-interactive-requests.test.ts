@@ -809,6 +809,146 @@ describe("internal interactive request lifecycle", () => {
     });
   });
 
+  it("stops a withdrawn provider interaction from holding the next send", async () => {
+    await withTestHarness(async (harness) => {
+      const { session, environment, thread } = seedThreadFixture(harness, {
+        session: { id: "host-interaction-withdraw" },
+      });
+      seedTurnStarted(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        turnId: "turn-withdraw",
+        providerThreadId: "provider-thread-withdraw",
+      });
+      const response = await harness.app.request(
+        "/internal/session/interactive-request",
+        {
+          method: "POST",
+          headers: internalAuthHeaders(harness),
+          body: JSON.stringify({
+            sessionId: session.id,
+            interaction: {
+              threadId: thread.id,
+              turnId: "turn-withdraw",
+              providerId: "codex",
+              providerThreadId: "provider-thread-withdraw",
+              providerRequestId: "request-withdraw",
+              payload: createCommandApprovalPayload({
+                itemId: "item-withdraw",
+                reason: "Needs approval",
+                command: "git push",
+                cwd: "/tmp/project",
+              }),
+            },
+          }),
+        },
+      );
+      expect(response.status).toBe(200);
+      await waitForPendingInteractionId({ harness, threadId: thread.id });
+      expect(
+        harness.deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(
+          thread.id,
+        ),
+      ).toBe(true);
+
+      const interruptResponse = await harness.app.request(
+        "/internal/session/interactive-request/interrupt",
+        {
+          method: "POST",
+          headers: internalAuthHeaders(harness),
+          body: JSON.stringify({
+            sessionId: session.id,
+            providerId: "codex",
+            threadIds: [thread.id],
+            reason: "Provider withdrew the interactive request",
+          }),
+        },
+      );
+
+      expect(interruptResponse.status).toBe(200);
+      expect(
+        harness.deps.pendingInteractions.hasTurnBoundPendingThreadInteraction(
+          thread.id,
+        ),
+      ).toBe(false);
+    });
+  });
+
+  it("interrupts only the named interaction so a retried withdrawal spares a newer one", async () => {
+    await withTestHarness(async (harness) => {
+      const { session, environment, thread } = seedThreadFixture(harness, {
+        session: { id: "host-interaction-scoped-withdraw" },
+      });
+      seedTurnStarted(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        turnId: "turn-scoped",
+        providerThreadId: "provider-thread-scoped",
+      });
+      const register = async (providerRequestId: string) => {
+        const response = await harness.app.request(
+          "/internal/session/interactive-request",
+          {
+            method: "POST",
+            headers: internalAuthHeaders(harness),
+            body: JSON.stringify({
+              sessionId: session.id,
+              interaction: {
+                threadId: thread.id,
+                turnId: "turn-scoped",
+                providerId: "codex",
+                providerThreadId: "provider-thread-scoped",
+                providerRequestId,
+                payload: createCommandApprovalPayload({
+                  itemId: `item-${providerRequestId}`,
+                  reason: "Needs approval",
+                  command: "git push",
+                  cwd: "/tmp/project",
+                }),
+              },
+            }),
+          },
+        );
+        expect(response.status).toBe(200);
+        const body = (await readJson(response)) as { interactionId: string };
+        return body.interactionId;
+      };
+      const withdraw = (interactionId: string) =>
+        harness.app.request("/internal/session/interactive-request/interrupt", {
+          method: "POST",
+          headers: internalAuthHeaders(harness),
+          body: JSON.stringify({
+            sessionId: session.id,
+            providerId: "codex",
+            threadIds: [thread.id],
+            reason: "Provider withdrew the interactive request",
+            interactionId,
+          }),
+        });
+
+      const first = await register("request-a");
+      const firstWithdrawal = await withdraw(first);
+      await expect(readJson(firstWithdrawal)).resolves.toEqual({
+        ok: true,
+        interactionIds: [first],
+      });
+      const second = await register("request-b");
+
+      // The daemon retries A's withdrawal because the first response was lost.
+      const retry = await withdraw(first);
+
+      await expect(readJson(retry)).resolves.toEqual({
+        ok: true,
+        interactionIds: [],
+      });
+      expect(
+        listPendingInteractionsByThread(harness.db, { threadId: thread.id })
+          .map(toPendingInteraction)
+          .find((interaction) => interaction.id === second),
+      ).toMatchObject({ status: "pending" });
+    });
+  });
+
   it("skips deleted threads in interrupt batches and still interrupts live threads", async () => {
     await withTestHarness(async (harness) => {
       const { host, session } = seedHostSession(harness.deps, {

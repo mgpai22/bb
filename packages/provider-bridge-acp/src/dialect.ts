@@ -34,6 +34,19 @@ type AcpCompactionOutcome =
   | { status: "skipped"; detail: string }
   | { status: "failed"; error: string };
 
+export interface AcpJobReport {
+  id: string;
+  task: boolean;
+  status: "running" | "completed" | "failed" | "interrupted";
+  summary?: string;
+}
+
+interface AcpAsyncJobsDialect {
+  taskJobs(event: AcpToolCallUpdateEvent): AcpJobReport[] | undefined;
+  waitReport(event: AcpToolCallUpdateEvent): AcpJobReport[] | undefined;
+  isWaitCandidate(event: AcpToolCallUpdateEvent): boolean;
+}
+
 export interface AcpDialect {
   readonly id: string;
   toolIdentity?(event: AcpToolCallUpdateEvent): AcpToolIdentity | undefined;
@@ -47,6 +60,7 @@ export interface AcpDialect {
     params: unknown,
   ): AcpClientRequestOutcome | undefined;
   maintenance?: AcpMaintenanceDialect;
+  asyncJobs?: AcpAsyncJobsDialect;
 }
 
 export interface AcpClientRequestOutcome {
@@ -389,9 +403,207 @@ export function compactionOutcomeForEndTurn(
     : { status: "failed", error: text };
 }
 
+// OMP sends no tool name over ACP; its `task` tool is recognized by the
+// single `{task, solutionSpace}` or batch `{context, tasks}` argument shape.
+const ompTaskItemSchema = z
+  .object({
+    agent: z.string().optional(),
+    task: z.string(),
+    solutionSpace: z.string(),
+  })
+  .passthrough();
+const ompTaskBatchSchema = z
+  .object({ context: z.string(), tasks: z.array(ompTaskItemSchema).min(1) })
+  .passthrough();
+const OMP_TASK_TOOL_TITLE = "task";
+
+function ompClassifyToolCall(
+  event: AcpToolCallUpdateEvent,
+): AcpClassifiedToolCall | undefined {
+  if (event.kind !== "other") {
+    return undefined;
+  }
+  const single = ompTaskItemSchema.safeParse(event.rawInput);
+  const batch = ompTaskBatchSchema.safeParse(event.rawInput);
+  if (!single.success && !batch.success) {
+    return undefined;
+  }
+  const label =
+    event.title !== undefined && event.title !== OMP_TASK_TOOL_TITLE
+      ? event.title
+      : batch.success
+        ? "Subagent tasks"
+        : "Subagent task";
+  const detail = batch.success
+    ? `${String(batch.data.tasks.length)} tasks`
+    : single.data?.agent;
+  return {
+    item: {
+      type: "delegation",
+      childRef: event.toolCallId,
+      label,
+      background: false,
+    },
+    presentation: delegationPresentation({
+      label,
+      ...(detail === undefined ? {} : { detail }),
+    }),
+  };
+}
+
+const OMP_TASK_OUTPUT_PATTERN = /<output>\n?([\s\S]*?)\n?<\/output>/;
+
+function ompJobSummary(text: string | undefined): string | undefined {
+  if (text === undefined) {
+    return undefined;
+  }
+  const summary = (OMP_TASK_OUTPUT_PATTERN.exec(text)?.[1] ?? text).trim();
+  return summary.length === 0 ? undefined : summary;
+}
+
+const ompAsyncTaskOutputSchema = z
+  .object({
+    details: z
+      .object({
+        progress: z.array(
+          z
+            .object({
+              id: z.string(),
+              status: z.string(),
+              extractedToolData: z
+                .object({
+                  yield: z
+                    .array(
+                      z
+                        .object({
+                          data: z.unknown().optional(),
+                          error: z.string().optional(),
+                        })
+                        .passthrough(),
+                    )
+                    .optional(),
+                })
+                .passthrough()
+                .optional(),
+            })
+            .passthrough(),
+        ),
+        results: z
+          .array(
+            z
+              .object({
+                id: z.string(),
+                output: z.string().optional(),
+                error: z.string().optional(),
+              })
+              .passthrough(),
+          )
+          .optional(),
+        async: z.object({}).passthrough(),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+const OMP_PROGRESS_STATUS: Readonly<Record<string, AcpJobReport["status"]>> = {
+  completed: "completed",
+  failed: "failed",
+  aborted: "interrupted",
+};
+
+function ompTaskJobs(
+  event: AcpToolCallUpdateEvent,
+): AcpJobReport[] | undefined {
+  const parsed = ompAsyncTaskOutputSchema.safeParse(event.rawOutput);
+  if (!parsed.success) {
+    return undefined;
+  }
+  const { progress, results } = parsed.data.details;
+  return progress.map((entry) => {
+    const status = OMP_PROGRESS_STATUS[entry.status] ?? "running";
+    const result = results?.find((candidate) => candidate.id === entry.id);
+    const yielded = entry.extractedToolData?.yield?.at(-1);
+    const yieldedText =
+      yielded?.error ??
+      (typeof yielded?.data === "string"
+        ? yielded.data
+        : yielded?.data === undefined
+          ? undefined
+          : JSON.stringify(yielded.data));
+    const summary =
+      status === "running"
+        ? undefined
+        : ompJobSummary(
+            (status === "completed"
+              ? result?.output
+              : (result?.error ?? result?.output)) ?? yieldedText,
+          );
+    return {
+      id: entry.id,
+      task: true,
+      status,
+      ...(summary === undefined ? {} : { summary }),
+    };
+  });
+}
+
+const ompWaitOutputSchema = z
+  .object({
+    details: z
+      .object({
+        op: z.literal("wait"),
+        jobs: z.array(
+          z
+            .object({
+              id: z.string(),
+              type: z.string().optional(),
+              status: z.enum(["running", "completed", "failed", "cancelled"]),
+              agentUrlId: z.string().optional(),
+              resultText: z.string().optional(),
+              errorText: z.string().optional(),
+            })
+            .passthrough(),
+        ),
+      })
+      .passthrough(),
+  })
+  .passthrough();
+
+function ompWaitReport(
+  event: AcpToolCallUpdateEvent,
+): AcpJobReport[] | undefined {
+  const parsed = ompWaitOutputSchema.safeParse(event.rawOutput);
+  if (!parsed.success) {
+    return undefined;
+  }
+  return parsed.data.details.jobs.map((job) => {
+    const task = job.type === "task";
+    const summary =
+      job.status === "completed"
+        ? ompJobSummary(job.resultText)
+        : (ompJobSummary(job.errorText) ?? ompJobSummary(job.resultText));
+    return {
+      id: task ? (job.agentUrlId ?? job.id) : job.id,
+      task,
+      status: job.status === "cancelled" ? "interrupted" : job.status,
+      ...(summary === undefined ? {} : { summary }),
+    };
+  });
+}
+
+const ompWaitInputSchema = z.object({ i: z.string().optional() }).strict();
+
 export const OMP_ACP_DIALECT: AcpDialect = {
   id: "omp",
   commandResult: ompCommandResult,
+  classifyToolCall: ompClassifyToolCall,
+  asyncJobs: {
+    taskJobs: ompTaskJobs,
+    waitReport: ompWaitReport,
+    isWaitCandidate: (event) =>
+      event.kind === "other" &&
+      ompWaitInputSchema.safeParse(event.rawInput).success,
+  },
 };
 
 const openCodeCommandRawOutputSchema = z

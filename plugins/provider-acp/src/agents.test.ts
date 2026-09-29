@@ -313,6 +313,19 @@ describe("acpProviderDeclaration", () => {
     );
   });
 
+  it("opts only omp into elicitation and its native user questions", () => {
+    const optedIn = KNOWN_ACP_AGENTS.filter((agent) => {
+      const declaration = acpProviderDeclaration(agent);
+      const bridgeOption =
+        declaration.experimental_bridgeOptions?.["elicitation"] === true;
+      expect(declaration.capabilities.supportsNativeUserQuestion).toBe(
+        bridgeOption,
+      );
+      return bridgeOption;
+    }).map((agent) => agent.id);
+    expect(optedIn).toEqual(["acp-omp"]);
+  });
+
   it("keeps each agent's own reasoning ladder and installed-only visibility", () => {
     const grok = acpProviderDeclaration(
       KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-grok")!,
@@ -339,6 +352,32 @@ describe("acpProviderDeclaration", () => {
     expect(cursor.experimental_visibility).toBeUndefined();
     expect(cursor.maintenance?.usage).toBe(true);
     expect(cursor.maintenance?.installation).toBe(true);
+  });
+
+  it("declares omp's thinking ladder, no Fast tier, and its current repository", () => {
+    const omp = acpProviderDeclaration(
+      KNOWN_ACP_AGENTS.find((agent) => agent.id === "acp-omp")!,
+    );
+    expect(omp.capabilities.reasoningLevels).toEqual([
+      "none",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    expect(omp.capabilities.supportsServiceTier).toBe(false);
+    expect(omp).not.toHaveProperty("serviceTiers");
+    expect(omp.strings?.installUrl).toBe("https://github.com/can1357/oh-my-pi");
+
+    for (const agent of KNOWN_ACP_AGENTS.filter((a) => a.id !== "acp-omp")) {
+      const declaration = acpProviderDeclaration(agent);
+      expect(declaration.capabilities.supportsServiceTier).toBe(true);
+      expect(declaration.serviceTiers?.map((tier) => tier.id)).toEqual([
+        "default",
+        "fast",
+      ]);
+    }
   });
 
   it("gives a configured agent honest copy when it names no sign-in command", () => {

@@ -78,6 +78,48 @@ describe("thread execution plan input sources", () => {
     });
   });
 
+  it("uses the default tier for a stale fast selection when the provider has no service tiers", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps, {
+        id: "host-no-tier-provider",
+      });
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "acp-omp",
+      });
+      upsertProjectExecutionDefaults(harness.deps.db, {
+        projectId: project.id,
+        providerId: "acp-omp",
+        model: "anthropic/claude-opus-5-5",
+        reasoningLevel: "medium",
+        permissionMode: "full",
+        serviceTier: "fast",
+      });
+      const resolveTier = async (serviceTier?: "fast") =>
+        (
+          await resolveExistingThreadExecutionPlan(harness.deps, {
+            executionSource: "client/turn/requested",
+            input:
+              serviceTier === undefined
+                ? {}
+                : { serviceTier: { source: "explicit", value: serviceTier } },
+            threadId: thread.id,
+          })
+        ).resolvedExecution.serviceTier;
+
+      expect(await resolveTier()).toBe("default");
+      expect(await resolveTier("fast")).toBe("default");
+    });
+  });
+
   it("treats supplied execution fields as explicit when legacy callers omit sources", () => {
     expect(
       buildExistingThreadExecutionInput({

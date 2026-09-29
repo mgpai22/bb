@@ -1,4 +1,10 @@
-import { providerRawEventSchema } from "@bb/domain";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import {
+  PROMPT_ATTACHMENT_MAX_BYTES,
+  providerRawEventSchema,
+} from "@bb/domain";
 import type { ProviderRawEvent } from "@bb/domain";
 import {
   COMPACTION_PRESENTATION,
@@ -40,6 +46,7 @@ import {
   GENERIC_ACP_DIALECT,
   type AcpDelegationReport,
   type AcpDialect,
+  type AcpJobReport,
 } from "./dialect.js";
 import {
   delegationPresentation,
@@ -58,11 +65,13 @@ import { resolveAcpToolCallPath } from "./tool-call-operation.js";
 import { acpVisibilityMetadata } from "./visibility.js";
 import {
   acpAgentMessageChunkUpdateSchema,
+  acpImageContentBlockSchema,
   acpAgentThoughtChunkUpdateSchema,
   acpPlanUpdateSchema,
   acpToolCallUpdateEventSchema,
   acpUsageUpdateSchema,
   extractAcpContentText,
+  type AcpImageContentBlock,
   type AcpSessionUpdate,
   type AcpStopReason,
   type AcpToolCallContent,
@@ -76,6 +85,45 @@ interface AcpDeltaTranslationContext {
 export interface AcpDeltaTranslatorOptions {
   cwd?: string | undefined;
   dialect?: AcpDialect | undefined;
+  imageDir?: string | undefined;
+}
+
+const ACP_IMAGE_EXTENSIONS: Readonly<Record<string, string>> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/gif": "gif",
+  "image/webp": "webp",
+};
+
+function saveAcpImage(
+  dir: string,
+  image: AcpImageContentBlock,
+): { path: string; error: null } | { path: null; error: string } {
+  const extension = ACP_IMAGE_EXTENSIONS[image.mimeType];
+  if (extension === undefined) {
+    return { path: null, error: `Unsupported image type ${image.mimeType}` };
+  }
+  if (Buffer.byteLength(image.data, "base64") > PROMPT_ATTACHMENT_MAX_BYTES) {
+    return {
+      path: null,
+      error: `Image exceeds the ${PROMPT_ATTACHMENT_MAX_BYTES} byte limit`,
+    };
+  }
+  const bytes = Buffer.from(image.data, "base64");
+  const path = join(
+    dir,
+    `${createHash("sha256").update(bytes).digest("hex")}.${extension}`,
+  );
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path, bytes);
+  } catch (error) {
+    return {
+      path: null,
+      error: `Could not save image: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  return { path, error: null };
 }
 
 export interface AcpPermissionToolCallInput {
@@ -163,14 +211,33 @@ interface AcpOpenToolCall {
   openedType: DeltaItemShape["type"];
   permissionTitle?: string;
   delegation?: AcpDelegationReport;
+  asyncJobs?: AcpJobReport[];
+  buffered?: boolean;
 }
+
+const ITEM_STATUS_SEVERITY: Readonly<Record<ThreadEventItemStatus, number>> = {
+  pending: 0,
+  completed: 1,
+  interrupted: 2,
+  failed: 3,
+};
+
+const UNSETTLED_JOB_NOTE: Readonly<Record<ThreadEventItemStatus, string>> = {
+  pending: "still running",
+  completed:
+    "still running when the turn ended; the agent receives the result later.",
+  interrupted: "still running when the turn was interrupted.",
+  failed: "still running when the turn failed.",
+};
 
 export function createAcpDeltaTranslator(
   options: AcpDeltaTranslatorOptions = {},
 ) {
   const dialect = options.dialect ?? GENERIC_ACP_DIALECT;
+  const imageDir = options.imageDir;
   const pathOptions = { cwd: options.cwd };
   const mergedToolCalls = new Map<string, AcpOpenToolCall>();
+  const deliveredJobIdsByThread = new Map<string, Set<string>>();
 
   let injectedToolsByName = new Map<string, AcpInjectedTool>();
   const injectedToolBindings = new Map<string, AcpInjectedTool>();
@@ -221,6 +288,7 @@ export function createAcpDeltaTranslator(
       injectedToolBindings.delete(key);
     }
     pendingInjectedCalls.delete(context?.threadId ?? "");
+    deliveredJobIdsByThread.delete(context?.threadId ?? "");
   }
 
   function configureInjectedTools(tools: readonly AcpInjectedTool[]): void {
@@ -470,6 +538,7 @@ export function createAcpDeltaTranslator(
     status: ThreadEventItemStatus;
     permissionTitle?: string | undefined;
     delegation?: AcpDelegationReport | undefined;
+    summary?: string | undefined;
     noTurnFallback?: DeltaNoTurnFallback;
   }
 
@@ -517,6 +586,10 @@ export function createAcpDeltaTranslator(
       ),
       args.permissionTitle,
     );
+    const item =
+      args.summary !== undefined && classified.item.type === "delegation"
+        ? { ...classified.item, summary: args.summary }
+        : classified.item;
     injectedToolBindings.delete(callKey(args.context, args.event.toolCallId));
     const closeFields =
       classified.item.type === "command"
@@ -529,10 +602,178 @@ export function createAcpDeltaTranslator(
       },
       status: args.status,
       ...closeFields,
-      item: classified.item,
+      item,
       presentation: classified.presentation,
       ...(args.noTurnFallback ? { noTurnFallback: args.noTurnFallback } : {}),
     };
+  }
+
+  function deliveredJobIds(
+    context: AcpDeltaTranslationContext | undefined,
+  ): Set<string> {
+    const threadId = context?.threadId ?? "";
+    const existing = deliveredJobIdsByThread.get(threadId);
+    if (existing !== undefined) {
+      return existing;
+    }
+    const created = new Set<string>();
+    deliveredJobIdsByThread.set(threadId, created);
+    return created;
+  }
+
+  function asyncDelegationClose(
+    context: AcpDeltaTranslationContext | undefined,
+    open: AcpOpenToolCall,
+    jobs: readonly AcpJobReport[],
+    turnStatus: ThreadEventItemStatus,
+    noTurnFallback?: AcpCloseArgs["noTurnFallback"],
+  ): ThreadDelta {
+    const running = jobs.filter((job) => job.status === "running");
+    const statuses: ThreadEventItemStatus[] = [
+      ...jobs.flatMap((job) => (job.status === "running" ? [] : [job.status])),
+      ...(running.length === 0
+        ? []
+        : [turnStatus === "completed" ? "interrupted" : turnStatus]),
+    ];
+    const lines = jobs.flatMap((job) =>
+      job.status === "running"
+        ? []
+        : jobs.length === 1
+          ? job.summary === undefined
+            ? []
+            : [job.summary]
+          : [`${job.id}: ${job.summary ?? job.status}`],
+    );
+    if (running.length > 0) {
+      lines.push(
+        `${running.map((job) => job.id).join(", ")} ${running.length === 1 ? "was" : "were"} ${UNSETTLED_JOB_NOTE[turnStatus]}`,
+      );
+    }
+    return toolCallClose({
+      context,
+      event: open.event,
+      status: statuses.reduce((worst, status) =>
+        ITEM_STATUS_SEVERITY[status] > ITEM_STATUS_SEVERITY[worst]
+          ? status
+          : worst,
+      ),
+      permissionTitle: open.permissionTitle,
+      delegation: open.delegation,
+      summary: lines.length === 0 ? undefined : lines.join("\n\n"),
+      noTurnFallback,
+    });
+  }
+
+  function applyJobReports(
+    context: AcpDeltaTranslationContext | undefined,
+    reports: readonly AcpJobReport[],
+    source: "progress" | "wait",
+  ): { deltas: ThreadDelta[]; attributed: boolean } {
+    const deltas: ThreadDelta[] = [];
+    const delivered = deliveredJobIds(context);
+    let attributed = reports.length > 0;
+    let informative = false;
+    for (const report of reports) {
+      if (!report.task) {
+        attributed = false;
+        continue;
+      }
+      const entry = threadCallEntries(context).find(([, open]) =>
+        open.asyncJobs?.some((job) => job.id === report.id),
+      );
+      if (entry === undefined) {
+        if (source === "wait" && delivered.delete(report.id)) {
+          informative = true;
+        } else {
+          attributed = false;
+        }
+        continue;
+      }
+      const [key, open] = entry;
+      const jobs = open.asyncJobs ?? [];
+      const current = jobs.find((job) => job.id === report.id);
+      if (report.status === "running" || current === undefined) {
+        continue;
+      }
+      informative = true;
+      if (current.status !== "running" && source === "progress") {
+        continue;
+      }
+      if (source === "wait") {
+        delivered.delete(report.id);
+      } else if (
+        report.status === "completed" &&
+        report.summary !== undefined
+      ) {
+        delivered.add(report.id);
+      }
+      const updated =
+        current.status === "running"
+          ? report
+          : { ...current, summary: report.summary ?? current.summary };
+      const nextJobs = jobs.map((job) => (job === current ? updated : job));
+      if (nextJobs.some((job) => job.status === "running")) {
+        mergedToolCalls.set(key, { ...open, asyncJobs: nextJobs });
+        continue;
+      }
+      mergedToolCalls.delete(key);
+      deltas.push(asyncDelegationClose(context, open, nextJobs, "completed"));
+    }
+    return { deltas, attributed: attributed && informative };
+  }
+
+  function finishedToolCallCloses(
+    args: AcpCloseArgs & { buffered: boolean },
+  ): ThreadDelta[] {
+    const reports = dialect.asyncJobs?.waitReport(args.event);
+    const settled =
+      reports === undefined
+        ? { deltas: [], attributed: false }
+        : applyJobReports(args.context, reports, "wait");
+    if (args.buffered && settled.attributed) {
+      return settled.deltas;
+    }
+    if (args.buffered) {
+      deliveredJobIdsByThread.delete(args.context?.threadId ?? "");
+    }
+    return [...settled.deltas, toolCallClose(args)];
+  }
+
+  function releaseBufferedCall(
+    context: AcpDeltaTranslationContext | undefined,
+    key: string,
+  ): ThreadDelta[] {
+    const open = mergedToolCalls.get(key);
+    if (open?.buffered !== true) {
+      return [];
+    }
+    mergedToolCalls.set(key, { ...open, buffered: false });
+    deliveredJobIdsByThread.delete(context?.threadId ?? "");
+    const classified = classifyCall(context, open.event);
+    return [
+      {
+        kind: "item.open",
+        key: { providerItemId: open.event.toolCallId },
+        item: classified.item,
+        presentation: classified.presentation,
+      },
+    ];
+  }
+
+  function turnEndClose(
+    context: AcpDeltaTranslationContext | undefined,
+    open: AcpOpenToolCall,
+    status: ThreadEventItemStatus,
+  ): ThreadDelta {
+    return open.asyncJobs === undefined
+      ? toolCallClose({
+          context,
+          event: open.event,
+          status,
+          permissionTitle: open.permissionTitle,
+          delegation: open.delegation,
+        })
+      : asyncDelegationClose(context, open, open.asyncJobs, status);
   }
 
   function commandCloseFields(
@@ -569,15 +810,7 @@ export function createAcpDeltaTranslator(
     const deltas: ThreadDelta[] = [];
     for (const [key, open] of threadCallEntries(context)) {
       mergedToolCalls.delete(key);
-      deltas.push(
-        toolCallClose({
-          context,
-          event: open.event,
-          status,
-          permissionTitle: open.permissionTitle,
-          delegation: open.delegation,
-        }),
-      );
+      deltas.push(turnEndClose(context, open, status));
     }
     return deltas;
   }
@@ -606,7 +839,34 @@ export function createAcpDeltaTranslator(
           ? extractAcpContentText(parsed.data.content)
           : undefined;
         if (text === undefined) {
-          return suppressedUnhandled(rawEvent);
+          const image = parsed.success
+            ? acpImageContentBlockSchema.safeParse(parsed.data.content)
+            : undefined;
+          if (imageDir === undefined || image?.success !== true) {
+            return suppressedUnhandled(rawEvent);
+          }
+          const saved = saveAcpImage(imageDir, image.data);
+          return [
+            closeThoughtStream(),
+            closeAssistantStream(),
+            {
+              kind: "item.close",
+              key: { providerItemId: randomUUID() },
+              status: saved.error === null ? "completed" : "failed",
+              item: {
+                type: "imageGeneration",
+                prompt: null,
+                ...saved,
+                transparentBackground: false,
+              },
+              noTurnFallback: noTurnFallbackFor(
+                updateEnvelope(context, {
+                  ...update,
+                  content: { type: "image", mimeType: image.data.mimeType },
+                }),
+              ),
+            },
+          ];
         }
         return [
           closeThoughtStream(),
@@ -651,14 +911,26 @@ export function createAcpDeltaTranslator(
         if (bound !== undefined) {
           injectedToolBindings.set(announcedKey, bound);
         }
+        const buffered =
+          !isTerminalAcpStatus(event.status) &&
+          dialect.asyncJobs?.isWaitCandidate(event) === true &&
+          (threadCallEntries(context).some(
+            ([, open]) => open.asyncJobs !== undefined,
+          ) ||
+            (deliveredJobIdsByThread.get(context?.threadId ?? "")?.size ?? 0) >
+              0);
+        if (!buffered) {
+          deliveredJobIdsByThread.delete(context?.threadId ?? "");
+        }
         if (isTerminalAcpStatus(event.status)) {
           return [
             ...flush,
-            toolCallClose({
+            ...finishedToolCallCloses({
               context,
               event,
               status: mapAcpToolCallStatus(event.status),
               noTurnFallback: noTurnFallbackFor(rawEvent),
+              buffered: false,
             }),
           ];
         }
@@ -666,7 +938,11 @@ export function createAcpDeltaTranslator(
         mergedToolCalls.set(announcedKey, {
           event,
           openedType: classified.item.type,
+          ...(buffered ? { buffered } : {}),
         });
+        if (buffered) {
+          return flush;
+        }
         return [
           ...flush,
           {
@@ -694,32 +970,85 @@ export function createAcpDeltaTranslator(
           open?.clientFileWrites ?? [],
         );
         if (isTerminalAcpStatus(merged.status)) {
-          mergedToolCalls.delete(key);
-          return [
-            toolCallClose({
-              context,
+          const jobs =
+            merged.status === "completed"
+              ? dialect.asyncJobs?.taskJobs(merged)
+              : undefined;
+          if (
+            jobs !== undefined &&
+            jobs.length > 0 &&
+            classifyCall(context, merged).item.type === "delegation"
+          ) {
+            const held = {
+              ...open,
               event: merged,
-              status: mapAcpToolCallStatus(merged.status),
-              permissionTitle: open?.permissionTitle,
-              delegation: open?.delegation,
-              noTurnFallback: noTurnFallbackFor(rawEvent),
-            }),
-          ];
+              openedType: open?.openedType ?? "delegation",
+              asyncJobs: jobs,
+            };
+            if (jobs.some((job) => job.status === "running")) {
+              mergedToolCalls.set(key, held);
+              return [];
+            }
+            mergedToolCalls.delete(key);
+            return [
+              asyncDelegationClose(
+                context,
+                held,
+                jobs,
+                "completed",
+                noTurnFallbackFor(rawEvent),
+              ),
+            ];
+          }
+          mergedToolCalls.delete(key);
+          return finishedToolCallCloses({
+            context,
+            event: merged,
+            status: mapAcpToolCallStatus(merged.status),
+            permissionTitle: open?.permissionTitle,
+            delegation: open?.delegation,
+            noTurnFallback: noTurnFallbackFor(rawEvent),
+            buffered: open?.buffered === true,
+          });
         }
         const mergedType = classifyCall(context, merged).item.type;
         mergedToolCalls.set(key, {
+          ...open,
           event: merged,
           openedType: open?.openedType ?? mergedType,
-          ...(open?.permissionTitle === undefined
-            ? {}
-            : { permissionTitle: open.permissionTitle }),
-          ...(open?.delegation === undefined
-            ? {}
-            : { delegation: open.delegation }),
-          ...(open?.clientFileWrites === undefined
-            ? {}
-            : { clientFileWrites: open.clientFileWrites }),
         });
+        if (open?.buffered === true) {
+          if (
+            event.rawOutput === undefined ||
+            dialect.asyncJobs?.waitReport(event) !== undefined
+          ) {
+            return [];
+          }
+          const bufferedProgress = extractAcpToolCallOutputText(event);
+          return [
+            ...releaseBufferedCall(context, key),
+            ...(bufferedProgress === undefined
+              ? []
+              : [
+                  {
+                    kind: "item.progress" as const,
+                    key: { providerItemId: event.toolCallId },
+                    message: bufferedProgress,
+                    noTurnFallback: noTurnFallbackFor(rawEvent),
+                  },
+                ]),
+          ];
+        }
+        if (open?.asyncJobs !== undefined) {
+          const settled = applyJobReports(
+            context,
+            dialect.asyncJobs?.taskJobs(merged) ?? [],
+            "progress",
+          );
+          if (!mergedToolCalls.has(key)) {
+            return settled.deltas;
+          }
+        }
         if (
           event.status === "in_progress" &&
           mergedType === "command" &&
@@ -847,8 +1176,14 @@ export function createAcpDeltaTranslator(
   ): ThreadDelta[] {
     const errorEnvelope = errorEnvelopeSchema.safeParse(event);
     if (errorEnvelope.success) {
+      const asyncCloses = threadCallEntries(context).flatMap(([, open]) =>
+        open.buffered === true || open.asyncJobs !== undefined
+          ? [turnEndClose(context, open, "failed")]
+          : [],
+      );
       clearThreadCalls(context);
       return [
+        ...asyncCloses,
         {
           kind: "provider.error",
           message: "Provider error",
@@ -1124,6 +1459,8 @@ export function createAcpDeltaTranslator(
     noteDelegationReport,
     noteInjectedToolCall,
     notePermissionToolCall,
+    releaseBufferedToolCall: (threadId: string, toolCallId: string) =>
+      releaseBufferedCall({ threadId }, callKey({ threadId }, toolCallId)),
     translateAcpEvent,
   };
 }

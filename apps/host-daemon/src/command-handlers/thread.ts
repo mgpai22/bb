@@ -61,6 +61,10 @@ export async function deleteThreadStorage(
     "Thread storage path escapes the storage root",
   );
   await fs.rm(storagePath, { recursive: true, force: true });
+  await options.runtimeManager.deleteThreadCommandsCache({
+    dataDir: options.dataDir,
+    threadId: command.threadId,
+  });
 }
 
 type ThreadStartRuntimeCommand =

@@ -10,11 +10,7 @@ import {
 } from "@bb/agent-runtime";
 import type { Logger } from "@bb/logger";
 import { sliceUtf16Tail } from "@bb/text-utils";
-import type {
-  PendingInteractionCreate,
-  PendingInteractionResolution,
-  ThreadEvent,
-} from "@bb/domain";
+import type { ThreadEvent } from "@bb/domain";
 import { threadScope, turnScope } from "@bb/domain";
 import type {
   HostDaemonActiveThread,
@@ -48,6 +44,10 @@ import type { FetchSkillTree } from "./skill-trees.js";
 import { userExecutableProcessOptions } from "./user-executable-env.js";
 import { runSetupScript } from "./environment-lifecycle-script.js";
 import { runInSerialLane } from "./serial-lane.js";
+import {
+  deleteAdvertisedThreadCommands,
+  writeAdvertisedThreadCommands,
+} from "./thread-commands-cache.js";
 
 type StopWatching = () => void | Promise<void>;
 
@@ -187,9 +187,7 @@ export interface RuntimeManagerOptions {
   onDataDirSkillsWatchError?: (args: {
     error: DataDirSkillsWatchError;
   }) => void;
-  onInteractiveRequest?: (
-    request: PendingInteractionCreate,
-  ) => Promise<PendingInteractionResolution>;
+  onInteractiveRequest?: AgentRuntimeOptions["onInteractiveRequest"];
   onToolCall?: AgentRuntimeOptions["onToolCall"];
   onStderr?: AgentRuntimeOptions["onStderr"];
   onProcessExit?: AgentRuntimeOptions["onProcessExit"];
@@ -283,6 +281,7 @@ export class RuntimeManager {
     Map<string, Set<Promise<void>>>
   >();
   private readonly threadControlTails = new Map<string, Promise<void>>();
+  private readonly threadCommandsCacheTails = new Map<string, Promise<void>>();
   private providerMaintenanceRuntime: AgentRuntime | null = null;
   private pendingProviderMaintenanceRuntime: PendingProviderMaintenanceRuntime | null =
     null;
@@ -339,6 +338,15 @@ export class RuntimeManager {
     work: () => T | PromiseLike<T>,
   ): Promise<T> {
     return runInSerialLane(this.threadControlTails, threadId, work);
+  }
+
+  deleteThreadCommandsCache(args: {
+    dataDir: string;
+    threadId: string;
+  }): Promise<void> {
+    return runInSerialLane(this.threadCommandsCacheTails, args.threadId, () =>
+      deleteAdvertisedThreadCommands(args),
+    );
   }
 
   async releaseThreadFromOtherEnvironments(args: {
@@ -1230,6 +1238,20 @@ export class RuntimeManager {
           },
           "Provider bridge raised a recovery hint",
         );
+      },
+      onThreadCommands: ({ threadId, commands }) => {
+        const dataDir = this.options.dataDir;
+        if (!dataDir) {
+          return;
+        }
+        void runInSerialLane(this.threadCommandsCacheTails, threadId, () =>
+          writeAdvertisedThreadCommands({ dataDir, threadId, commands }),
+        ).catch((error: unknown) => {
+          this.options.logger?.warn(
+            { err: error, threadId },
+            "Failed to persist advertised thread commands",
+          );
+        });
       },
       onProcessExit: (info) => {
         if (!info.expected) {

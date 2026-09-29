@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type { AgentRuntime } from "@bb/agent-runtime";
+import type { AgentRuntime, AgentRuntimeOptions } from "@bb/agent-runtime";
 import type {
   HostDaemonInjectedSkillSource,
   ProviderCliInstallEvent,
@@ -25,6 +25,10 @@ import {
 import type { CommandOf } from "./command-dispatch-support.js";
 import { RuntimeManager } from "./runtime-manager.js";
 import { stageInjectedSkillSources } from "./injected-skills.js";
+import {
+  readAdvertisedThreadCommands,
+  writeAdvertisedThreadCommands,
+} from "./thread-commands-cache.js";
 
 const WORKSPACE_PATH = "/tmp/bb-command-dispatch-test";
 
@@ -174,6 +178,16 @@ function createRuntime(): FakeDispatchRuntime {
     }),
     clearThreadGoal: vi.fn(async () => ({ cleared: true })),
     renameThread: vi.fn(async () => undefined),
+    listThreadCommands: vi.fn(
+      async (): Promise<{
+        commands: {
+          name: string;
+          description: string | null;
+          argumentHint: string | null;
+        }[];
+        advertised: boolean;
+      }> => ({ commands: [], advertised: false }),
+    ),
     archiveThread: vi.fn(async () => undefined),
     unarchiveThread: vi.fn(async () => undefined),
     listModels: vi.fn(async () => ({
@@ -2481,5 +2495,421 @@ describe("dispatchCommand", () => {
       providerId: "pi",
       bridgeLaunch: dispatchTestRuntimeBridgeLaunch(options.dataDir),
     });
+  });
+  it("serves live thread commands from the owning runtime", async () => {
+    const dataDir = await makeTempDir("bb-command-dispatch-thread-commands-");
+    const storageRoot = path.join(dataDir, "thread-storage");
+    const runtime = createRuntime();
+    const manager = new RuntimeManager({
+      dataDir,
+      createRuntime: () => runtime,
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await manager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+    runtime.setIdle("thread-1");
+    vi.mocked(runtime.listThreadCommands).mockResolvedValueOnce({
+      commands: [
+        {
+          name: "ui-check",
+          description: "Run UI verification checks",
+          argumentHint: "<fixture>",
+        },
+      ],
+      advertised: true,
+    });
+
+    const result = await dispatchOnlineRpcCommand(
+      { type: "thread.commands", environmentId: "env-1", threadId: "thread-1" },
+      {
+        dataDir,
+        logger: silentLogger,
+        eventSink: { emit: vi.fn(), flush: vi.fn(async () => undefined) },
+        fetchProjectAttachment: async () => {
+          throw new Error("Unexpected project attachment fetch");
+        },
+        fetchPluginHostArtifact: fetchDispatchTestArtifact,
+        ...unexpectedProviderMaintenance,
+        runtimeManager: manager,
+        threadStorageRootPath: storageRoot,
+      },
+    );
+
+    expect(result).toEqual({
+      commands: [
+        {
+          name: "ui-check",
+          source: "command",
+          origin: "project",
+          description: "Run UI verification checks",
+          argumentHint: "<fixture>",
+        },
+      ],
+      advertised: true,
+    });
+    expect(runtime.listThreadCommands).toHaveBeenCalledWith({
+      threadId: "thread-1",
+    });
+  });
+
+  it("returns no thread commands without an owning runtime", async () => {
+    const dataDir = await makeTempDir("bb-command-dispatch-thread-commands-");
+    const runtime = createRuntime();
+    const manager = new RuntimeManager({
+      dataDir,
+      createRuntime: () => runtime,
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await manager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+
+    const result = await dispatchOnlineRpcCommand(
+      { type: "thread.commands", environmentId: "env-1", threadId: "thread-1" },
+      {
+        dataDir,
+        logger: silentLogger,
+        eventSink: { emit: vi.fn(), flush: vi.fn(async () => undefined) },
+        fetchProjectAttachment: async () => {
+          throw new Error("Unexpected project attachment fetch");
+        },
+        fetchPluginHostArtifact: fetchDispatchTestArtifact,
+        ...unexpectedProviderMaintenance,
+        runtimeManager: manager,
+        threadStorageRootPath: path.join(dataDir, "thread-storage"),
+      },
+    );
+
+    expect(result).toEqual({ commands: [], advertised: false });
+    expect(runtime.listThreadCommands).not.toHaveBeenCalled();
+  });
+
+  it("serves commands advertised before the runtime shut down without a prior palette query", async () => {
+    const dataDir = await makeTempDir("bb-command-dispatch-thread-commands-");
+    const liveRuntime = createRuntime();
+    let liveOptions: AgentRuntimeOptions | undefined;
+    const liveManager = new RuntimeManager({
+      dataDir,
+      createRuntime: (options) => {
+        liveOptions = options;
+        return liveRuntime;
+      },
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await liveManager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+    liveOptions?.onThreadCommands?.({
+      threadId: "thread-1",
+      commands: [
+        {
+          name: "jobs",
+          description: "List background jobs",
+          argumentHint: null,
+        },
+      ],
+    });
+    await vi.waitFor(async () => {
+      expect(
+        await readAdvertisedThreadCommands({ dataDir, threadId: "thread-1" }),
+      ).not.toBeNull();
+    });
+    await liveManager.shutdownAll();
+
+    const coldRuntime = createRuntime();
+    const coldManager = new RuntimeManager({
+      dataDir,
+      createRuntime: () => coldRuntime,
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await coldManager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+    const result = await dispatchOnlineRpcCommand(
+      { type: "thread.commands", environmentId: "env-1", threadId: "thread-1" },
+      {
+        dataDir,
+        logger: silentLogger,
+        eventSink: { emit: vi.fn(), flush: vi.fn(async () => undefined) },
+        fetchProjectAttachment: async () => {
+          throw new Error("Unexpected project attachment fetch");
+        },
+        fetchPluginHostArtifact: fetchDispatchTestArtifact,
+        ...unexpectedProviderMaintenance,
+        runtimeManager: coldManager,
+        threadStorageRootPath: path.join(dataDir, "thread-storage"),
+      },
+    );
+
+    expect(result).toEqual({
+      commands: [
+        {
+          name: "jobs",
+          source: "command",
+          origin: "project",
+          description: "List background jobs",
+          argumentHint: null,
+        },
+      ],
+      advertised: true,
+    });
+    expect(coldRuntime.listThreadCommands).not.toHaveBeenCalled();
+  });
+
+  it("serves the persisted set when the resident runtime has not advertised yet", async () => {
+    const dataDir = await makeTempDir("bb-command-dispatch-thread-commands-");
+    await writeAdvertisedThreadCommands({
+      dataDir,
+      threadId: "thread-1",
+      commands: [
+        {
+          name: "win-check",
+          description: "Run Windows checks",
+          argumentHint: null,
+        },
+      ],
+    });
+    const runtime = createRuntime();
+    const manager = new RuntimeManager({
+      dataDir,
+      createRuntime: () => runtime,
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await manager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+    runtime.setIdle("thread-1");
+
+    const result = await dispatchOnlineRpcCommand(
+      { type: "thread.commands", environmentId: "env-1", threadId: "thread-1" },
+      {
+        dataDir,
+        logger: silentLogger,
+        eventSink: { emit: vi.fn(), flush: vi.fn(async () => undefined) },
+        fetchProjectAttachment: async () => {
+          throw new Error("Unexpected project attachment fetch");
+        },
+        fetchPluginHostArtifact: fetchDispatchTestArtifact,
+        ...unexpectedProviderMaintenance,
+        runtimeManager: manager,
+        threadStorageRootPath: path.join(dataDir, "thread-storage"),
+      },
+    );
+
+    expect(result).toEqual({
+      commands: [
+        {
+          name: "win-check",
+          source: "command",
+          origin: "project",
+          description: "Run Windows checks",
+          argumentHint: null,
+        },
+      ],
+      advertised: true,
+    });
+  });
+
+  it("prefers the live advertised set over a stale persisted set", async () => {
+    const dataDir = await makeTempDir("bb-command-dispatch-thread-commands-");
+    await writeAdvertisedThreadCommands({
+      dataDir,
+      threadId: "thread-1",
+      commands: [
+        { name: "stale", description: "Stale entry", argumentHint: null },
+      ],
+    });
+    const runtime = createRuntime();
+    const manager = new RuntimeManager({
+      dataDir,
+      createRuntime: () => runtime,
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await manager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+    runtime.setIdle("thread-1");
+    vi.mocked(runtime.listThreadCommands).mockResolvedValueOnce({
+      commands: [
+        {
+          name: "fresh",
+          description: "Fresh entry",
+          argumentHint: null,
+        },
+      ],
+      advertised: true,
+    });
+
+    const result = await dispatchOnlineRpcCommand(
+      { type: "thread.commands", environmentId: "env-1", threadId: "thread-1" },
+      {
+        dataDir,
+        logger: silentLogger,
+        eventSink: { emit: vi.fn(), flush: vi.fn(async () => undefined) },
+        fetchProjectAttachment: async () => {
+          throw new Error("Unexpected project attachment fetch");
+        },
+        fetchPluginHostArtifact: fetchDispatchTestArtifact,
+        ...unexpectedProviderMaintenance,
+        runtimeManager: manager,
+        threadStorageRootPath: path.join(dataDir, "thread-storage"),
+      },
+    );
+
+    expect(result).toEqual({
+      commands: [
+        {
+          name: "fresh",
+          source: "command",
+          origin: "project",
+          description: "Fresh entry",
+          argumentHint: null,
+        },
+      ],
+      advertised: true,
+    });
+  });
+
+  it("removes the persisted command set with thread storage deletion", async () => {
+    const dataDir = await makeTempDir("bb-command-dispatch-thread-commands-");
+    const runtime = createRuntime();
+    const manager = new RuntimeManager({
+      dataDir,
+      createRuntime: () => runtime,
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await manager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+    runtime.setIdle("thread-1");
+    await writeAdvertisedThreadCommands({
+      dataDir,
+      threadId: "thread-1",
+      commands: [
+        {
+          name: "ui-check",
+          description: "Run UI verification checks",
+          argumentHint: null,
+        },
+      ],
+    });
+
+    await dispatchCommand(
+      {
+        type: "thread.storage.delete",
+        environmentId: "env-1",
+        threadId: "thread-1",
+      },
+      {
+        dataDir,
+        logger: silentLogger,
+        eventSink: { emit: vi.fn(), flush: vi.fn(async () => undefined) },
+        fetchProjectAttachment: async () => {
+          throw new Error("Unexpected project attachment fetch");
+        },
+        fetchPluginHostArtifact: fetchDispatchTestArtifact,
+        ...unexpectedProviderMaintenance,
+        runtimeManager: manager,
+        threadStorageRootPath: path.join(dataDir, "thread-storage"),
+      },
+    );
+
+    await expect(
+      readAdvertisedThreadCommands({ dataDir, threadId: "thread-1" }),
+    ).resolves.toBeNull();
+  });
+
+  it("does not let a queued advertisement write recreate the cache after thread storage deletion", async () => {
+    const dataDir = await makeTempDir("bb-command-dispatch-thread-commands-");
+    const runtime = createRuntime();
+    let runtimeOptions: AgentRuntimeOptions | undefined;
+    const manager = new RuntimeManager({
+      dataDir,
+      createRuntime: (options) => {
+        runtimeOptions = options;
+        return runtime;
+      },
+      provisionWorkspace: async () => createWorkspace(),
+    });
+    await manager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: WORKSPACE_PATH,
+    });
+    runtime.setIdle("thread-1");
+    const storagePath = path.join(dataDir, "thread-storage", "thread-1");
+    const writeStarted = createDeferredPromise<void>();
+    const releaseWrite = createDeferredPromise<void>();
+    const originalWriteFile = fs.writeFile;
+    const originalRm = fs.rm;
+    // Hold the cache write before its temp file exists. Deletion releases it
+    // once thread storage is gone, before the cache file removal.
+    const writeSpy = vi
+      .spyOn(fs, "writeFile")
+      .mockImplementation(async (...args) => {
+        writeStarted.resolve();
+        await releaseWrite.promise;
+        return originalWriteFile(...args);
+      });
+    const rmSpy = vi.spyOn(fs, "rm").mockImplementation(async (...args) => {
+      await originalRm(...args);
+      if (args[0] === storagePath) {
+        releaseWrite.resolve();
+      }
+    });
+    const renameDone = createDeferredPromise<void>();
+    const originalRename = fs.rename;
+    const renameSpy = vi
+      .spyOn(fs, "rename")
+      .mockImplementation(async (...args) => {
+        await originalRename(...args);
+        renameDone.resolve();
+      });
+    try {
+      runtimeOptions?.onThreadCommands?.({
+        threadId: "thread-1",
+        commands: [
+          { name: "jobs", description: "List jobs", argumentHint: null },
+        ],
+      });
+      await writeStarted.promise;
+
+      const deletion = dispatchCommand(
+        {
+          type: "thread.storage.delete",
+          environmentId: "env-1",
+          threadId: "thread-1",
+        },
+        {
+          dataDir,
+          logger: silentLogger,
+          eventSink: { emit: vi.fn(), flush: vi.fn(async () => undefined) },
+          fetchProjectAttachment: async () => {
+            throw new Error("Unexpected project attachment fetch");
+          },
+          fetchPluginHostArtifact: fetchDispatchTestArtifact,
+          ...unexpectedProviderMaintenance,
+          runtimeManager: manager,
+          threadStorageRootPath: path.join(dataDir, "thread-storage"),
+        },
+      );
+      await deletion;
+      await renameDone.promise;
+    } finally {
+      writeSpy.mockRestore();
+      rmSpy.mockRestore();
+      renameSpy.mockRestore();
+    }
+
+    await expect(
+      readAdvertisedThreadCommands({ dataDir, threadId: "thread-1" }),
+    ).resolves.toBeNull();
   });
 });

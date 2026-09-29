@@ -1,5 +1,13 @@
+import { mkdtempSync, readdirSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { threadScope, turnScope, type ThreadEvent } from "@bb/domain";
+import {
+  PROMPT_ATTACHMENT_MAX_BYTES,
+  threadScope,
+  turnScope,
+  type ThreadEvent,
+} from "@bb/domain";
 import type { ProviderRuntimeEvent } from "@bb/provider-bridge-protocol/bridge-kit";
 import { createDeltaAssembler } from "@bb/provider-bridge-protocol/assembler";
 import type { DeltaAssembler } from "@bb/provider-bridge-protocol/assembler";
@@ -34,8 +42,10 @@ interface AcpEquivalenceHarness {
 
 const SESSION_CWD = "/workspace";
 
-function createHarness(): AcpEquivalenceHarness {
-  const translator = createAcpDeltaTranslator({ cwd: SESSION_CWD });
+function createHarness(
+  options: { imageDir?: string } = {},
+): AcpEquivalenceHarness {
+  const translator = createAcpDeltaTranslator({ cwd: SESSION_CWD, ...options });
   const assembler = createDeltaAssembler({
     providerId: "acp",
     entropyPrefix: ENTROPY,
@@ -558,6 +568,109 @@ describe("acp delta translation (moved from the legacy adapter suite)", () => {
         updateEvent({ sessionUpdate: "usage_update", used: 1, size: "200000" }),
       ),
     ).toEqual([]);
+  });
+
+  describe("assistant image chunks", () => {
+    const PNG_1X1 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+
+    function ompImageChunk(data: string, mimeType: string) {
+      return updateEvent({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data, mimeType },
+        messageId: "0b6e1d2a-3c4f-4e5a-9b7c-8d9e0f1a2b3c",
+      });
+    }
+
+    it("saves an omp image chunk to disk and completes an image item between text", () => {
+      const imageDir = mkdtempSync(join(tmpdir(), "acp-images-"));
+      const harness = createHarness({ imageDir });
+      harness.translate(turnStartedEvent());
+      harness.translate(
+        updateEvent({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Here it is:" },
+        }),
+      );
+
+      const events = harness.translate(ompImageChunk(PNG_1X1, "image/png"));
+      const items = completedItems(events);
+      expect(items).toEqual([
+        expect.objectContaining({ type: "agentMessage", text: "Here it is:" }),
+        expect.objectContaining({
+          type: "imageGeneration",
+          status: "completed",
+          prompt: null,
+          path: expect.stringMatching(/\.png$/),
+          error: null,
+          transparentBackground: false,
+        }),
+      ]);
+      const path = items[1]?.type === "imageGeneration" ? items[1].path : null;
+      expect(path?.startsWith(`${imageDir}/`)).toBe(true);
+      expect(readFileSync(path ?? "")).toEqual(Buffer.from(PNG_1X1, "base64"));
+
+      const after = harness.translate(
+        updateEvent({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Done." },
+        }),
+      );
+      expect(after.map((event) => event.type)).toEqual([
+        "item/started",
+        "item/agentMessage/delta",
+      ]);
+    });
+
+    it("reports an oversized or unsupported image instead of writing it", () => {
+      const imageDir = mkdtempSync(join(tmpdir(), "acp-images-"));
+      const harness = createHarness({ imageDir });
+      harness.translate(turnStartedEvent());
+      const oversized = "A".repeat(
+        Math.ceil((PROMPT_ATTACHMENT_MAX_BYTES + 3) / 3) * 4,
+      );
+
+      expect(
+        completedItems(
+          harness.translate(ompImageChunk(oversized, "image/png")),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "imageGeneration",
+          path: null,
+          error: `Image exceeds the ${PROMPT_ATTACHMENT_MAX_BYTES} byte limit`,
+        }),
+      ]);
+      expect(
+        completedItems(
+          harness.translate(ompImageChunk(PNG_1X1, "image/svg+xml")),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "imageGeneration",
+          path: null,
+          error: "Unsupported image type image/svg+xml",
+        }),
+      ]);
+      expect(readdirSync(imageDir)).toEqual([]);
+    });
+
+    it("keeps base64 image data out of the no-turn fallback", () => {
+      const imageDir = mkdtempSync(join(tmpdir(), "acp-images-"));
+      const harness = createHarness({ imageDir });
+
+      const events = harness.translate(ompImageChunk(PNG_1X1, "image/png"));
+
+      expect(JSON.stringify(events)).toContain("image/png");
+      expect(JSON.stringify(events)).not.toContain(PNG_1X1);
+    });
+
+    it("keeps suppressing image chunks when no image directory is configured", () => {
+      const harness = startedHarness();
+      expect(harness.translate(ompImageChunk(PNG_1X1, "image/png"))).toEqual(
+        [],
+      );
+    });
   });
 
   it("accumulates thought chunks into a reasoning item", () => {
@@ -2535,6 +2648,761 @@ describe("acp delta translation (dialects)", () => {
         label: "Audit the config loader",
         presentation: { icon: { glyph: "UserRound" } },
       },
+    });
+  });
+
+  function ompTaskCall(rawInput: Record<string, unknown>, title = "task") {
+    return updateEvent({
+      sessionUpdate: "tool_call",
+      toolCallId: "toolu_omp_task",
+      title,
+      kind: "other",
+      status: "pending",
+      rawInput,
+    });
+  }
+
+  it("opens and settles an omp task call as a delegation", () => {
+    const harness = dialectHarness("omp");
+    const opened = harness.translate(
+      ompTaskCall(
+        {
+          agent: "explore",
+          task: "Map the retry code path in src/net.",
+          solutionSpace: "read-only survey",
+        },
+        "Mapping retry path",
+      ),
+    );
+    expect(opened[0]).toMatchObject({
+      type: "item/started",
+      item: {
+        type: "delegation",
+        childRef: "toolu_omp_task",
+        label: "Mapping retry path",
+        background: false,
+        presentation: { icon: { glyph: "UserRound" }, detail: "explore" },
+      },
+    });
+
+    harness.translate(
+      updateEvent({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "toolu_omp_task",
+        status: "in_progress",
+        rawOutput: {
+          content: [{ type: "text", text: "1 agent running" }],
+          details: {
+            results: [],
+            totalDurationMs: 10,
+            progress: [
+              { id: "0-Explore", agent: "explore", status: "running" },
+            ],
+          },
+        },
+      }),
+    );
+    expect(
+      completedItems(
+        harness.translate(
+          updateEvent({
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_omp_task",
+            status: "completed",
+            rawOutput: {
+              content: [
+                { type: "text", text: "Retry lives in src/net/retry.ts" },
+              ],
+              details: {
+                results: [{ id: "0-Explore", agent: "explore", exitCode: 0 }],
+                totalDurationMs: 4200,
+              },
+            },
+          }),
+        ),
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        id: opened[0]?.type === "item/started" ? opened[0].item.id : "",
+        type: "delegation",
+        status: "completed",
+        label: "Mapping retry path",
+      }),
+    ]);
+  });
+
+  it("labels an omp batch task call and falls back when the title is the tool name", () => {
+    expect(
+      dialectHarness("omp").translate(
+        ompTaskCall({
+          context: "Shared goal",
+          tasks: [
+            { agent: "task", task: "Fix A", solutionSpace: "one fix" },
+            { task: "Fix B", solutionSpace: "one fix" },
+          ],
+        }),
+      )[0],
+    ).toMatchObject({
+      type: "item/started",
+      item: {
+        type: "delegation",
+        label: "Subagent tasks",
+        presentation: { detail: "2 tasks" },
+      },
+    });
+  });
+
+  it("keeps other omp tools generic", () => {
+    expect(
+      dialectHarness("omp").translate(
+        ompTaskCall({ ids: ["0-Explore"] }, "wait"),
+      )[0],
+    ).toMatchObject({ type: "item/started", item: { type: "toolCall" } });
+  });
+
+  describe("omp async task jobs", () => {
+    const SINGLE_TASK = {
+      context: "Goal",
+      tasks: [{ task: "Reply sub-ok", solutionSpace: "one reply" }],
+    };
+
+    function taskFrame(args: {
+      status: "completed" | "in_progress";
+      progress: Record<string, unknown>[];
+      results?: Record<string, unknown>[];
+      state?: string;
+      text?: string;
+    }) {
+      return updateEvent({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "toolu_omp_task",
+        status: args.status,
+        rawOutput: {
+          content: [{ type: "text", text: args.text ?? "Spawned agent" }],
+          details: {
+            projectAgentsDir: null,
+            results: args.results ?? [],
+            totalDurationMs: 1,
+            progress: args.progress.map((entry, index) => ({
+              index,
+              agent: "sonic",
+              ...entry,
+            })),
+            async: {
+              state: args.state ?? "running",
+              jobId: args.progress[0]?.["id"],
+              type: "task",
+            },
+          },
+        },
+      });
+    }
+
+    function waitCall(toolCallId: string, intent = "Waiting for SubOk result") {
+      return updateEvent({
+        sessionUpdate: "tool_call",
+        toolCallId,
+        title: intent,
+        kind: "other",
+        status: "pending",
+        rawInput: { i: intent },
+      });
+    }
+
+    function waitResult(toolCallId: string, jobs: Record<string, unknown>[]) {
+      return updateEvent({
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        rawOutput: {
+          content: [{ type: "text", text: "## Completed (1)" }],
+          details: {
+            op: "wait",
+            meta: {
+              source: { type: "report", value: "background jobs snapshot" },
+            },
+            jobs,
+          },
+        },
+      });
+    }
+
+    function taskResultText(id: string, output: string) {
+      return `<task-result id="${id}" agent="sonic" status="completed" duration="9.3s">\n<meta lines="1" size="8B" />\n<output>\n${output}\n</output>\n</task-result>\n\n${id} is now idle`;
+    }
+
+    function completedJob(id: string, output: string) {
+      return {
+        id,
+        type: "task",
+        status: "completed",
+        label: id,
+        durationMs: 9281,
+        resultText: taskResultText(id, output),
+        agentUrlId: id,
+      };
+    }
+
+    function spawned(jobIds: string[]) {
+      const harness = dialectHarness("omp");
+      harness.translate(ompTaskCall(SINGLE_TASK, "Spawning sub-ok subagent"));
+      const events = harness.translate(
+        taskFrame({
+          status: "completed",
+          progress: jobIds.map((id) => ({ id, status: "pending" })),
+        }),
+      );
+      return { harness, events };
+    }
+
+    it("keeps an async spawn open and settles it with the wait result", () => {
+      const { harness, events } = spawned(["SubOk"]);
+      expect(events).toEqual([]);
+      expect(harness.translate(waitCall("toolu_wait"))).toEqual([]);
+      const settled = harness.translate(
+        waitResult("toolu_wait", [completedJob("SubOk", '"sub-ok"')]),
+      );
+      expect(settled).toEqual([
+        expect.objectContaining({
+          type: "item/completed",
+          item: expect.objectContaining({
+            type: "delegation",
+            childRef: "toolu_omp_task",
+            status: "completed",
+            summary: '"sub-ok"',
+          }),
+        }),
+      ]);
+      expect(
+        completedItems(harness.translate(turnCompletedEvent("end_turn"))),
+      ).toEqual([]);
+    });
+
+    it("closes a batch delegation only after every job settles", () => {
+      const { harness } = spawned(["A", "B"]);
+      harness.translate(waitCall("toolu_wait_1"));
+      expect(
+        harness.translate(
+          waitResult("toolu_wait_1", [
+            completedJob("A", "a-done"),
+            { id: "B", type: "task", status: "running", label: "B" },
+          ]),
+        ),
+      ).toEqual([]);
+      harness.translate(waitCall("toolu_wait_2"));
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait_2", [completedJob("B", "b-done")]),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "completed",
+          summary: "A: a-done\n\nB: b-done",
+        }),
+      ]);
+    });
+
+    it.each([
+      { status: "failed", expected: "failed" },
+      { status: "cancelled", expected: "interrupted" },
+    ])(
+      "maps a $status job to a $expected delegation",
+      ({ status, expected }) => {
+        const { harness } = spawned(["SubOk"]);
+        harness.translate(waitCall("toolu_wait"));
+        expect(
+          completedItems(
+            harness.translate(
+              waitResult("toolu_wait", [
+                {
+                  id: "SubOk",
+                  type: "task",
+                  status,
+                  label: "SubOk",
+                  errorText: "  boom  ",
+                  agentUrlId: "SubOk",
+                },
+              ]),
+            ),
+          ),
+        ).toEqual([
+          expect.objectContaining({
+            type: "delegation",
+            status: expected,
+            summary: "boom",
+          }),
+        ]);
+      },
+    );
+
+    it("does not settle a task delegation from a colliding non-task job", () => {
+      const { harness } = spawned(["A"]);
+      harness.translate(waitCall("toolu_wait"));
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait", [
+              {
+                id: "A",
+                type: "bash",
+                status: "completed",
+                label: "sleep",
+                resultText: "shell output",
+              },
+              {
+                id: "A-2",
+                type: "task",
+                status: "running",
+                label: "A",
+                agentUrlId: "A",
+              },
+            ]),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({ type: "toolCall", status: "completed" }),
+      ]);
+      expect(
+        completedItems(harness.translate(turnCompletedEvent("end_turn"))),
+      ).toEqual([
+        expect.objectContaining({ type: "delegation", status: "interrupted" }),
+      ]);
+    });
+
+    it("settles a task job id that differs from its agent id", () => {
+      const { harness } = spawned(["A"]);
+      harness.translate(waitCall("toolu_wait"));
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait", [
+              { ...completedJob("A", "a-done"), id: "A-2", agentUrlId: "A" },
+            ]),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({ type: "delegation", summary: "a-done" }),
+      ]);
+    });
+
+    it("keeps a wait row that reports only running jobs", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_wait"));
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait", [
+              { id: "SubOk", type: "task", status: "running", label: "SubOk" },
+            ]),
+          ),
+        ),
+      ).toEqual([expect.objectContaining({ type: "toolCall" })]);
+    });
+
+    it("settles from the task's own progress frame when the job ends", () => {
+      const { harness } = spawned(["SubOk"]);
+      expect(
+        completedItems(
+          harness.translate(
+            taskFrame({
+              status: "in_progress",
+              state: "completed",
+              text: "Background task SubOk complete.",
+              progress: [
+                {
+                  id: "SubOk",
+                  status: "completed",
+                  extractedToolData: {
+                    yield: [{ data: "sub-ok", status: "success" }],
+                  },
+                },
+              ],
+            }),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "completed",
+          summary: "sub-ok",
+        }),
+      ]);
+      expect(harness.translate(waitCall("toolu_wait"))).toEqual([]);
+      expect(
+        harness.translate(
+          waitResult("toolu_wait", [completedJob("SubOk", '"sub-ok"')]),
+        ),
+      ).toEqual([]);
+    });
+
+    it("counts settled mixed-batch members in the final status and summary", () => {
+      const harness = dialectHarness("omp");
+      harness.translate(ompTaskCall(SINGLE_TASK));
+      harness.translate(
+        taskFrame({
+          status: "completed",
+          progress: [
+            { id: "A", status: "pending" },
+            { id: "B", status: "failed" },
+            { id: "C", status: "completed" },
+          ],
+          results: [{ id: "C", exitCode: 0, output: "c-out" }],
+        }),
+      );
+      harness.translate(waitCall("toolu_wait"));
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait", [completedJob("A", "a-done")]),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "failed",
+          summary: "A: a-done\n\nB: failed\n\nC: c-out",
+        }),
+      ]);
+    });
+
+    it("keeps settled members and failure status at turn end", () => {
+      const harness = dialectHarness("omp");
+      harness.translate(ompTaskCall(SINGLE_TASK));
+      harness.translate(
+        taskFrame({
+          status: "completed",
+          progress: [
+            { id: "A", status: "pending" },
+            { id: "B", status: "failed" },
+          ],
+        }),
+      );
+      expect(
+        completedItems(harness.translate(turnCompletedEvent("end_turn"))),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "failed",
+          summary:
+            "B: failed\n\nA was still running when the turn ended; the agent receives the result later.",
+        }),
+      ]);
+    });
+
+    it("aggregates a mixed batch whose members all settled before the spawn returned", () => {
+      const harness = dialectHarness("omp");
+      harness.translate(ompTaskCall(SINGLE_TASK));
+      expect(
+        completedItems(
+          harness.translate(
+            taskFrame({
+              status: "completed",
+              state: "failed",
+              progress: [
+                { id: "A", status: "failed" },
+                { id: "B", status: "completed" },
+              ],
+              results: [{ id: "B", exitCode: 0, output: "B done" }],
+            }),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "failed",
+          summary: "A: failed\n\nB: B done",
+        }),
+      ]);
+    });
+
+    it.each([
+      ["a failure without a yield", { status: "failed" }],
+      [
+        "a failure after a successful yield",
+        {
+          status: "failed",
+          extractedToolData: { yield: [{ data: "child ok" }] },
+        },
+      ],
+      ["a success without a summary", { status: "completed" }],
+    ])("keeps the later wait row after %s", (_name, progress) => {
+      const { harness } = spawned(["A"]);
+      harness.translate(
+        taskFrame({
+          status: "in_progress",
+          progress: [{ id: "A", ...progress }],
+        }),
+      );
+      expect(harness.translate(waitCall("toolu_wait"))).toEqual([
+        expect.objectContaining({ type: "item/started" }),
+      ]);
+      const items = completedItems(
+        harness.translate(
+          waitResult("toolu_wait", [
+            {
+              id: "A",
+              type: "task",
+              status: "failed",
+              agentUrlId: "A",
+              errorText: "Workspace merge failed: changes kept in /tmp/wt",
+            },
+          ]),
+        ),
+      );
+      expect(items).toEqual([expect.objectContaining({ type: "toolCall" })]);
+      expect(JSON.stringify(items)).toContain("Workspace merge failed");
+    });
+
+    it("opens a later {i}-only call live once an auto-delivered result is followed by another tool", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(
+        taskFrame({
+          status: "in_progress",
+          progress: [
+            {
+              id: "SubOk",
+              status: "completed",
+              extractedToolData: { yield: [{ data: "sub-ok" }] },
+            },
+          ],
+        }),
+      );
+      expect(
+        harness.translate(waitCall("toolu_todo", "Checking todos")),
+      ).toEqual([]);
+      harness.translate(
+        updateEvent({
+          sessionUpdate: "tool_call_update",
+          toolCallId: "toolu_todo",
+          status: "completed",
+          rawOutput: { content: [{ type: "text", text: "no todos" }] },
+        }),
+      );
+      expect(harness.translate(waitCall("toolu_next", "Next step"))).toEqual([
+        expect.objectContaining({ type: "item/started" }),
+      ]);
+    });
+
+    it("opens a later {i}-only call live once a non-wait tool follows an auto-delivered result", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(
+        taskFrame({
+          status: "in_progress",
+          progress: [
+            {
+              id: "SubOk",
+              status: "completed",
+              extractedToolData: { yield: [{ data: "sub-ok" }] },
+            },
+          ],
+        }),
+      );
+      harness.translate(
+        updateEvent({
+          sessionUpdate: "tool_call",
+          toolCallId: "toolu_read",
+          title: "Read notes",
+          kind: "read",
+          status: "pending",
+          rawInput: { path: "/tmp/notes.md" },
+        }),
+      );
+      expect(harness.translate(waitCall("toolu_next", "Next step"))).toEqual([
+        expect.objectContaining({ type: "item/started" }),
+      ]);
+    });
+
+    it("keeps a wait row that reports an unrelated job", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_wait"));
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait", [
+              completedJob("SubOk", "ok"),
+              completedJob("Other", "other"),
+            ]),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({ type: "delegation", summary: "ok" }),
+        expect.objectContaining({
+          type: "toolCall",
+          tool: "other",
+          status: "completed",
+        }),
+      ]);
+    });
+
+    it("opens a wait normally when no async delegation is open", () => {
+      const harness = dialectHarness("omp");
+      expect(harness.translate(waitCall("toolu_wait"))[0]).toMatchObject({
+        type: "item/started",
+        item: { type: "toolCall", tool: "other" },
+      });
+      expect(
+        completedItems(
+          harness.translate(
+            waitResult("toolu_wait", [completedJob("SubOk", "ok")]),
+          ),
+        ),
+      ).toEqual([expect.objectContaining({ type: "toolCall" })]);
+    });
+
+    it("closes an async delegation left open at turn end", () => {
+      const { harness } = spawned(["SubOk"]);
+      expect(
+        completedItems(harness.translate(turnCompletedEvent("end_turn"))),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "interrupted",
+          summary:
+            "SubOk was still running when the turn ended; the agent receives the result later.",
+        }),
+      ]);
+      expect(harness.openTurnId()).toBe("");
+    });
+
+    it("flushes a buffered call that is not a wait at turn end", () => {
+      const { harness } = spawned(["SubOk"]);
+      expect(
+        harness.translate(waitCall("toolu_todo", "Checking todos")),
+      ).toEqual([]);
+      expect(
+        completedItems(harness.translate(turnCompletedEvent("cancelled"))),
+      ).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          status: "interrupted",
+          summary: "SubOk was still running when the turn was interrupted.",
+        }),
+        expect.objectContaining({ type: "toolCall", status: "interrupted" }),
+      ]);
+    });
+
+    it("closes the held delegation and buffered call as failed on a provider error", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_wait"));
+      const events = harness.translate({
+        jsonrpc: "2.0",
+        method: "error",
+        params: { threadId: THREAD_ID, message: "agent exploded" },
+      });
+      expect(events.map((event) => event.type)).toEqual([
+        "item/completed",
+        "item/completed",
+        "provider/error",
+        "turn/completed",
+      ]);
+      expect(completedItems(events)).toEqual([
+        expect.objectContaining({
+          type: "delegation",
+          childRef: "toolu_omp_task",
+          status: "failed",
+          summary: "SubOk was still running when the turn failed.",
+        }),
+        expect.objectContaining({ type: "toolCall", status: "failed" }),
+      ]);
+    });
+
+    it("opens a buffered call once a non-wait progress frame arrives", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_todo", "Checking todos"));
+      expect(
+        harness.translate(
+          updateEvent({
+            sessionUpdate: "tool_call_update",
+            toolCallId: "toolu_todo",
+            status: "in_progress",
+            rawOutput: {
+              content: [{ type: "text", text: "scanning" }],
+              details: {},
+            },
+          }),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "item/started",
+          item: expect.objectContaining({ type: "toolCall", tool: "other" }),
+        }),
+      ]);
+    });
+
+    it("opens a buffered call when a permission request names it", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_todo", "Checking todos"));
+      expect(
+        harness.assembler.assemble({
+          threadId: THREAD_ID,
+          deltas: harness.translator.releaseBufferedToolCall(
+            THREAD_ID,
+            "toolu_todo",
+          ),
+        }),
+      ).toEqual([
+        expect.objectContaining({
+          type: "item/started",
+          item: expect.objectContaining({ type: "toolCall" }),
+        }),
+      ]);
+      expect(
+        harness.translator.releaseBufferedToolCall(THREAD_ID, "toolu_todo"),
+      ).toEqual([]);
+    });
+
+    it("emits a buffered call whose result is not a wait report", () => {
+      const { harness } = spawned(["SubOk"]);
+      harness.translate(waitCall("toolu_todo", "Checking todos"));
+      expect(
+        completedItems(
+          harness.translate(
+            updateEvent({
+              sessionUpdate: "tool_call_update",
+              toolCallId: "toolu_todo",
+              status: "completed",
+              rawOutput: {
+                content: [{ type: "text", text: "no todos" }],
+                details: {},
+              },
+            }),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({
+          type: "toolCall",
+          status: "completed",
+          result: expect.anything(),
+        }),
+      ]);
+    });
+
+    it("closes a sync omp task result immediately", () => {
+      const harness = dialectHarness("omp");
+      harness.translate(ompTaskCall(SINGLE_TASK));
+      expect(
+        completedItems(
+          harness.translate(
+            updateEvent({
+              sessionUpdate: "tool_call_update",
+              toolCallId: "toolu_omp_task",
+              status: "completed",
+              rawOutput: {
+                content: [{ type: "text", text: "sub-ok" }],
+                details: {
+                  results: [{ id: "SubOk", exitCode: 0 }],
+                  progress: [{ id: "SubOk", status: "completed" }],
+                },
+              },
+            }),
+          ),
+        ),
+      ).toEqual([
+        expect.objectContaining({ type: "delegation", status: "completed" }),
+      ]);
     });
   });
 

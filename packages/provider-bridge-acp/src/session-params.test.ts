@@ -156,6 +156,7 @@ describe("buildAcpSessionParams", () => {
           },
         },
         parameterizedModelPicker: false,
+        elicitation: false,
         launchSpec: launchSpecFor({
           displayName: "Custom ACP",
           command: "custom-agent",
@@ -189,6 +190,7 @@ describe("buildAcpSessionParams", () => {
         cwd: "/workspace",
         options: { ...BASE_OPTIONS, model: "requested-model" },
         parameterizedModelPicker: false,
+        elicitation: false,
         launchSpec: launchSpecFor({
           displayName: "Custom ACP",
           command: "custom-agent",
@@ -218,6 +220,7 @@ describe("buildAcpSessionParams", () => {
       providerLabel: "acp-custom",
       threadId: "thread-1",
       parameterizedModelPicker: false,
+      elicitation: false,
     } as const;
 
     expect(
@@ -274,6 +277,7 @@ gemini-3.5-flash claude-sonnet-4 gpt-5-mini gemini-2.5-flash kimi-k3 kimi-k2.7-c
       dialectId: "cursor",
       options: { ...BASE_OPTIONS, ...options },
       parameterizedModelPicker: true,
+      elicitation: false,
       launchSpec: launchSpecFor(cursorSpec),
       providerLabel: "acp-cursor",
       threadId: "thread-1",
@@ -376,6 +380,7 @@ gemini-3.5-flash claude-sonnet-4 gpt-5-mini gemini-2.5-flash kimi-k3 kimi-k2.7-c
       cwd: "/workspace",
       options: { ...BASE_OPTIONS, model: "custom/strong" },
       parameterizedModelPicker: false,
+      elicitation: false,
       launchSpec: launchSpecFor({
         displayName: "Custom ACP",
         command: "custom-acp",
@@ -409,6 +414,7 @@ describe("buildAcpSessionParams skill instructions", () => {
       cwd: "/workspace",
       options: { ...BASE_OPTIONS, ...options },
       parameterizedModelPicker: false,
+      elicitation: false,
       launchSpec: launchSpecFor({
         displayName: "Custom ACP",
         command: "custom-agent",

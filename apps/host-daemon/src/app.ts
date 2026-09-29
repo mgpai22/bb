@@ -135,6 +135,8 @@ export interface HostDaemonApp {
 }
 
 interface PendingInteractiveInterruptRequest {
+  /** Set for a withdrawal; omitted interrupts every provider interaction on the threads. */
+  interactionId?: string;
   providerId: string;
   reason: string;
   threadIds: readonly string[];
@@ -295,6 +297,7 @@ export async function createHostDaemonApp(
       request.providerId,
       request.reason,
       [...request.threadIds].sort().join(","),
+      request.interactionId ?? "",
     ].join("|");
   }
 
@@ -341,7 +344,10 @@ export async function createHostDaemonApp(
             source: "interruptInteractiveRequests",
             request: () => serverClient.interruptInteractiveRequests(request),
           });
-          pendingInteractiveInterrupts.delete(key);
+          // A same-key enqueue during the POST replaced this entry; keep it.
+          if (pendingInteractiveInterrupts.get(key) === request) {
+            pendingInteractiveInterrupts.delete(key);
+          }
         } catch (error) {
           options.logger.warn(
             {
@@ -394,6 +400,14 @@ export async function createHostDaemonApp(
       enqueueInteractiveInterrupt({
         providerId: request.providerId,
         reason: `Failed to register interactive request while provider was waiting: ${error.message}`,
+        threadIds: [request.threadId],
+      });
+    },
+    onWithdrawn: (request, interactionId) => {
+      enqueueInteractiveInterrupt({
+        interactionId,
+        providerId: request.providerId,
+        reason: "Provider withdrew the interactive request",
         threadIds: [request.threadId],
       });
     },
@@ -545,10 +559,16 @@ export async function createHostDaemonApp(
         throw error;
       }
     },
-    onInteractiveRequest: async (request) => {
+    onInteractiveRequest: async (request, signal) => {
       try {
-        return await interactiveRequestRegistry.registerAndWait(request);
+        return await interactiveRequestRegistry.registerAndWait(
+          request,
+          signal,
+        );
       } catch (error) {
+        if (signal?.aborted) {
+          throw error;
+        }
         if (
           error instanceof InteractiveRequestRegistryError &&
           error.code === "interactive_request_rejected"

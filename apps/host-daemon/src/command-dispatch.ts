@@ -1,5 +1,9 @@
 import { operationEnvironment } from "./operation-environment.js";
 import {
+  hostThreadCommands,
+  readAdvertisedThreadCommands,
+} from "./thread-commands-cache.js";
+import {
   runEnvironmentHook,
   cancelEnvironmentHook,
 } from "./command-handlers/environment-hook.js";
@@ -650,6 +654,30 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
   },
   "host.list_commands": listHostCommands,
   "host.list_skills": listHostSkills,
+  "thread.commands": async (command, options) => {
+    const owner = options.runtimeManager.listThreadOwnerEntries(
+      command.threadId,
+    )[0];
+    if (owner) {
+      const result = await owner.runtime.listThreadCommands({
+        threadId: command.threadId,
+      });
+      if (result.advertised) {
+        return {
+          commands: hostThreadCommands(result.commands),
+          advertised: true,
+        };
+      }
+    }
+    const cached = await readAdvertisedThreadCommands({
+      dataDir: options.dataDir,
+      threadId: command.threadId,
+    }).catch(() => null);
+    if (cached !== null) {
+      return { commands: cached, advertised: true };
+    }
+    return { commands: [], advertised: false };
+  },
   "host.delete_skill": deleteHostSkill,
   "host.write_skill": writeHostSkill,
   "host.install_global_skills": installGlobalSkills,

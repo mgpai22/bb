@@ -327,16 +327,20 @@ export async function resolveExistingThreadExecutionPlan(
     reasoningLevel,
   );
 
-  const serviceTier = getAppSettings(deps.db).allowFastServiceTier
-    ? resolveFieldWithDefault<ServiceTier>(
-        [
-          args.input.serviceTier?.value,
-          lastExecution?.serviceTier,
-          projectExecution?.serviceTier,
-        ],
-        DEFAULT_SERVICE_TIER,
-      )
-    : DEFAULT_SERVICE_TIER;
+  const providerSupportsServiceTier =
+    deps.providerRegistry.get(thread.providerId)?.info.capabilities
+      .supportsServiceTier ?? true;
+  const serviceTier =
+    providerSupportsServiceTier && getAppSettings(deps.db).allowFastServiceTier
+      ? resolveFieldWithDefault<ServiceTier>(
+          [
+            args.input.serviceTier?.value,
+            lastExecution?.serviceTier,
+            projectExecution?.serviceTier,
+          ],
+          DEFAULT_SERVICE_TIER,
+        )
+      : DEFAULT_SERVICE_TIER;
 
   const resolvedExecution = {
     model,

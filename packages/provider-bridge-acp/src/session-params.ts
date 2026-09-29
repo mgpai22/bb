@@ -72,6 +72,7 @@ export interface AcpSessionParams {
   reasoningCli?: AcpBridgeReasoningCli;
   nativeReasoning?: AcpBridgeNativeReasoning;
   parameterizedModelPicker: boolean;
+  elicitation?: true;
   permissionCli?: AcpBridgePermissionCli;
   permissionMode: "accept-edits" | "full";
   workspaceWriteRoots: string[];
@@ -264,6 +265,7 @@ interface BuildAcpSessionParamsArgs {
   providerLabel: string;
   threadId: string;
   parameterizedModelPicker: boolean;
+  elicitation: boolean;
 }
 
 export function buildAcpSessionParams(
@@ -296,6 +298,7 @@ export function buildAcpSessionParams(
       args.dialectId,
     ),
     parameterizedModelPicker: args.parameterizedModelPicker,
+    ...(args.elicitation ? { elicitation: true } : {}),
     ...(launchSpec.reasoningCli !== undefined
       ? { reasoningCli: launchSpec.reasoningCli }
       : {}),

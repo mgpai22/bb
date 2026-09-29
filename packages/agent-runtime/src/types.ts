@@ -21,6 +21,7 @@ import type {
   ProviderInstallationStatus,
   ProviderUsageResult,
   SkillsConfigureRoot,
+  ThreadCommand,
 } from "@bb/provider-bridge-protocol";
 
 export type AgentRuntimeShellEnvironment = Record<string, string>;
@@ -81,6 +82,7 @@ export interface AgentRuntimeOptions {
 
   onInteractiveRequest?: (
     request: PendingInteractionCreate,
+    signal?: AbortSignal,
   ) => Promise<PendingInteractionResolution>;
 
   onStderr?: (line: string, threadId?: string) => void;
@@ -88,6 +90,11 @@ export interface AgentRuntimeOptions {
   onProcessExit?: (info: AgentRuntimeProcessExitInfo) => void;
 
   onProviderRecovery?: (hint: AgentRuntimeProviderRecoveryHint) => void;
+
+  onThreadCommands?: (args: {
+    threadId: string;
+    commands: ThreadCommand[];
+  }) => void;
 }
 
 export interface AgentRuntimeProviderRecoveryHint {
@@ -262,6 +269,9 @@ export interface RenameThreadArgs {
   threadId: string;
   title: string;
 }
+export interface ListThreadCommandsArgs {
+  threadId: string;
+}
 
 interface ClearThreadGoalArgs {
   threadId: string;
@@ -317,6 +327,11 @@ export interface AgentRuntime {
   stopThread(args: StopThreadArgs): Promise<StopThreadResult>;
 
   clearThreadGoal(args: ClearThreadGoalArgs): Promise<{ cleared: boolean }>;
+
+  listThreadCommands(args: ListThreadCommandsArgs): Promise<{
+    commands: ThreadCommand[];
+    advertised: boolean;
+  }>;
 
   renameThread(args: RenameThreadArgs): Promise<void>;
 

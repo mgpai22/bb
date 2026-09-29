@@ -202,4 +202,64 @@ describe("InteractiveRequestRegistry", () => {
 
     await expect(pending).rejects.toThrow("Provider exited");
   });
+
+  it("withdraws a registered request when the provider aborts it", async () => {
+    const request = createCommandApprovalRequest();
+    const withdrawn: PendingInteractionCreate[] = [];
+    const registry = new InteractiveRequestRegistry({
+      registerRequest: async () => ({
+        outcome: "created",
+        interactionId: "pint_registry",
+        status: "pending",
+      }),
+      onWithdrawn: (withdrawnRequest) => withdrawn.push(withdrawnRequest),
+    });
+    const controller = new AbortController();
+
+    const pending = registry.registerAndWait(request, controller.signal);
+    await new Promise(setImmediate);
+    controller.abort();
+
+    await expect(pending).rejects.toThrow(
+      "Provider withdrew the interactive request",
+    );
+    expect(withdrawn).toEqual([request]);
+    expect(() =>
+      registry.resolve({
+        interactionId: "pint_registry",
+        providerId: request.providerId,
+        providerRequestId: request.providerRequestId,
+        providerThreadId: request.providerThreadId,
+        resolution: createCommandApprovalResolution(),
+        threadId: request.threadId,
+      }),
+    ).toThrowError(InteractiveRequestRegistryError);
+  });
+
+  it("withdraws a request aborted mid-registration only after the server knows it", async () => {
+    const request = createCommandApprovalRequest();
+    const registration =
+      createDeferredPromise<HostDaemonInteractiveRequestResponse>();
+    const withdrawn: PendingInteractionCreate[] = [];
+    const registry = new InteractiveRequestRegistry({
+      registerRequest: () => registration.promise,
+      onWithdrawn: (withdrawnRequest) => withdrawn.push(withdrawnRequest),
+    });
+    const controller = new AbortController();
+
+    const pending = registry.registerAndWait(request, controller.signal);
+    controller.abort();
+    await new Promise(setImmediate);
+    expect(withdrawn).toEqual([]);
+
+    registration.resolve({
+      outcome: "created",
+      interactionId: "pint_registry",
+      status: "pending",
+    });
+    await expect(pending).rejects.toThrow(
+      "Provider withdrew the interactive request",
+    );
+    expect(withdrawn).toEqual([request]);
+  });
 });

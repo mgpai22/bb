@@ -98,6 +98,7 @@ const ACP_NATIVE_REASONING_LEVEL_BY_VALUE: Readonly<
   Partial<Record<string, ReasoningLevel>>
 > = {
   none: "none",
+  off: "none",
   minimal: "low",
   low: "low",
   medium: "medium",
@@ -111,7 +112,7 @@ const ACP_NATIVE_REASONING_LEVEL_BY_VALUE: Readonly<
 const ACP_NATIVE_REASONING_VALUE_CANDIDATES_BY_LEVEL: Readonly<
   Partial<Record<ReasoningLevel, readonly string[]>>
 > = {
-  none: ["none"],
+  none: ["none", "off"],
   low: ["low", "minimal"],
   medium: ["medium"],
   high: ["high"],
@@ -199,7 +200,9 @@ export function buildAcpNativeReasoningSupport(
     defaultReasoningEffort:
       currentLevel !== undefined && supportedLevels.includes(currentLevel)
         ? currentLevel
-        : supportedReasoningEfforts[0].reasoningEffort,
+        : matchedValueByLevel.get(supportedLevels[0]) === "off"
+          ? (supportedLevels[1] ?? supportedLevels[0])
+          : supportedLevels[0],
   };
 }
 

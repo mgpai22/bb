@@ -15,6 +15,7 @@ import {
   providerUsageResultSchema,
   ThreadEventGrammar,
   threadIdentityResultSchema,
+  threadCommandsResultSchema,
 } from "@bb/provider-bridge-protocol";
 import {
   JsonRpcResponseError,
@@ -308,6 +309,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
   const threadGoalState = new RuntimeThreadGoalState();
   const turnState = new RuntimeTurnState();
   const toolCalls = new RuntimeToolCalls();
+  const interactiveRequests = new RuntimeToolCalls();
   const backgroundWorkState = new RuntimeBackgroundWorkState();
   const threadEventGrammar = new ThreadEventGrammar();
   const bridgeNodeEnv = defaultBridgeNodeEnv();
@@ -1279,6 +1281,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
           args.proc.interactiveRequestScope,
           cancellation.data.requestId,
         );
+        interactiveRequests.cancel(
+          args.proc.interactiveRequestScope,
+          cancellation.data.requestId,
+        );
       }
       return;
     }
@@ -1305,6 +1311,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         proc: args.proc,
         source: "unsolicited",
       });
+      return;
+    }
+    const threadCommands = args.proc.adapter.decodeThreadCommands?.(
+      args.parsed,
+    );
+    if (threadCommands !== null && threadCommands !== undefined) {
+      if (args.proc.identity.threadIds.has(threadCommands.threadId)) {
+        options.onThreadCommands?.(threadCommands);
+      }
       return;
     }
     emitTranslatedEvents({
@@ -1341,6 +1356,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
         onInteractiveRequest: options.onInteractiveRequest,
         onToolCall: options.onToolCall,
         toolCalls,
+        interactiveRequests,
         parsedId: parsedLine.parsedId,
         parsedMethod: parsedLine.parsedMethod,
         providerProcess: proc,
@@ -2326,6 +2342,32 @@ export function createAgentRuntime(options: AgentRuntimeOptions): AgentRuntime {
               threadId,
             },
           });
+        },
+      });
+    },
+
+    async listThreadCommands({ threadId }) {
+      return runThreadOperation({
+        threadId,
+        work: async () => {
+          try {
+            const proc = requireProviderProcessForThread(threadId);
+            const plan = proc.adapter.buildCommandPlan({
+              type: "thread/commands",
+              threadId,
+              providerThreadId: requireProviderThreadId(threadId),
+            });
+            if (plan.kind === "noop") {
+              return { commands: [], advertised: false };
+            }
+            return await sendCommand({
+              proc,
+              message: plan,
+              resultSchema: threadCommandsResultSchema,
+            });
+          } catch {
+            return { commands: [], advertised: false };
+          }
         },
       });
     },

@@ -29,6 +29,15 @@ export function extractAcpContentText(
   return parsed.success ? parsed.data.text : undefined;
 }
 
+export const acpImageContentBlockSchema = z
+  .object({
+    type: z.literal("image"),
+    data: z.string(),
+    mimeType: z.string(),
+  })
+  .passthrough();
+export type AcpImageContentBlock = z.infer<typeof acpImageContentBlockSchema>;
+
 export const ACP_TOOL_KINDS = [
   "read",
   "edit",
@@ -194,6 +203,15 @@ export const acpUsageUpdateSchema = z
   .passthrough();
 export type AcpUsageUpdate = z.infer<typeof acpUsageUpdateSchema>;
 
+export const acpAvailableCommandsUpdateSchema = z
+  .object({
+    sessionUpdate: z.literal("available_commands_update"),
+    availableCommands: z.array(z.unknown()),
+  })
+  .passthrough();
+export type AcpAvailableCommandsUpdate = z.infer<
+  typeof acpAvailableCommandsUpdateSchema
+>;
 const acpOtherSessionUpdateSchema = z
   .object({
     sessionUpdate: z.string(),
@@ -206,6 +224,7 @@ export const acpSessionUpdateSchema = z.union([
   acpToolCallUpdateEventSchema,
   acpPlanUpdateSchema,
   acpUsageUpdateSchema,
+  acpAvailableCommandsUpdateSchema,
   acpOtherSessionUpdateSchema,
 ]);
 export type AcpSessionUpdate = z.infer<typeof acpSessionUpdateSchema>;

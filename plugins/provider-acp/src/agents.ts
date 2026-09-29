@@ -19,6 +19,7 @@ export interface AcpAgentDefinition {
   launch: AcpLaunchSpec;
   dialect?: string;
   parameterizedModelPicker?: boolean;
+  elicitation?: boolean;
   primaryModels?: readonly string[];
   reasoningProbePriorityModelIds?: readonly string[];
   visibility?: "always" | "installed";
@@ -26,6 +27,7 @@ export interface AcpAgentDefinition {
   installUrl?: string;
   iconTint?: { light: string; dark: string };
   supportsManualCompaction?: boolean;
+  supportsServiceTier?: boolean;
   fork?: "none" | "tip";
   reasoningLevels?: readonly PluginProviderReasoningLevel[];
   providerUsage?: boolean;

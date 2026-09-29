@@ -18,9 +18,11 @@ import {
   THREAD_DELTA_NOTIFICATION_METHOD,
   providerRecoveryNotificationSchema,
   sessionReplacedNotificationSchema,
+  threadCommandsNotificationSchema,
   threadDeltaNotificationParamsSchema,
   threadIdentityNotificationSchema,
   type BridgeCapabilities,
+  type ThreadCommand,
 } from "@bb/provider-bridge-protocol";
 import {
   ASSEMBLER_GRAMMAR_VERSIONS,
@@ -63,6 +65,9 @@ export interface BridgeProtocolAdapter {
   };
   translateEvent(event: ProviderRuntimeEvent): ThreadEvent[];
   decodeRecoveryHint(event: ProviderRuntimeEvent): ProviderRecoveryHint | null;
+  decodeThreadCommands(
+    event: ProviderRuntimeEvent,
+  ): { threadId: string; commands: ThreadCommand[] } | null;
   decodeToolCallRequest(
     request: ProviderInboundRequest,
   ): DecodedToolCallRequest | null;
@@ -372,6 +377,15 @@ export function createBridgeProtocolAdapter(
               providerThreadId: command.providerThreadId,
             },
           };
+        case "thread/commands":
+          return gate("threadCommands", {
+            kind: "request",
+            method: BRIDGE_REQUEST_METHODS.threadCommands,
+            params: {
+              threadId: command.threadId,
+              providerThreadId: command.providerThreadId,
+            },
+          });
         case "thread/name/set":
           return gate("threadRename", {
             kind: "request",
@@ -568,6 +582,16 @@ export function createBridgeProtocolAdapter(
         message: parsed.data.message,
         retryable: parsed.data.retryable,
       };
+    },
+
+    decodeThreadCommands(event) {
+      if (event.method !== BRIDGE_NOTIFICATION_METHODS.threadCommands) {
+        return null;
+      }
+      const parsed = threadCommandsNotificationSchema.safeParse(event.params);
+      return parsed.success
+        ? { threadId: parsed.data.threadId, commands: parsed.data.commands }
+        : null;
     },
 
     decodeToolCallRequest(
