@@ -1860,6 +1860,7 @@ async function startAgentSession(
     let sessionId: string | undefined;
     let loadedConfigOptions: readonly AcpConfigOption[] | undefined;
     let loadedModels: AcpSessionModels | undefined;
+    let restoreFailure = "The agent does not advertise session/load.";
     let createdFreshSession = false;
     if (request.kind === "fork") {
       const forkedSession = await connection.request({
@@ -1901,11 +1902,9 @@ async function startAgentSession(
         loadedModels = configState?.models;
         rememberGrokContextWindow(session, configState?.models);
         sessionId = request.resumeProviderThreadId;
-      } catch {
+      } catch (error) {
         sessionId = undefined;
-        session.loading = false;
-        session.loadingSessionId = undefined;
-        session.pendingLoadUsageUpdate = undefined;
+        restoreFailure = `session/load failed: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
 
@@ -1930,9 +1929,13 @@ async function startAgentSession(
         nativeReasoning: params.nativeReasoning,
       });
       if (request.kind === "resume") {
+        process.stderr.write(
+          `acp bridge: could not restore session "${request.resumeProviderThreadId}" for thread "${bbThreadId}" in ${params.cwd}: ${restoreFailure}\n`,
+        );
         emitStartNotification(ACP_WARNING_METHOD, {
           threadId: bbThreadId,
           summary: `${agentLabel} could not restore the previous session; continuing in a fresh session without in-agent history.`,
+          details: restoreFailure,
         });
       }
     } else {

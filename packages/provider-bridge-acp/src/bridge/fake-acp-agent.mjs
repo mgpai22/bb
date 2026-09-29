@@ -10,6 +10,8 @@
  * Env knobs (passed by tests through thread/start envVars):
  * - FAKE_ACP_LOAD_SESSION=1  → advertise + accept session/load
  * - FAKE_ACP_FAIL_LOAD=1     → advertise session/load, then fail it
+ * - FAKE_ACP_LOAD_REQUIRE_CWD → fail session/load like omp acp when the
+ *                            request cwd differs from this stored cwd
  * - FAKE_ACP_FORK_SESSION=1  → advertise + accept session/fork
  * - FAKE_ACP_FORK_LOG        → write the session/fork params as JSON
  * - FAKE_ACP_FORK_REUSE_SOURCE_ID=1
@@ -80,6 +82,7 @@ const forkSession = process.env.FAKE_ACP_FORK_SESSION === "1";
 const forkReuseSourceId = process.env.FAKE_ACP_FORK_REUSE_SOURCE_ID === "1";
 const usageOnLoad = process.env.FAKE_ACP_USAGE_ON_LOAD === "1";
 const usageSessionId = process.env.FAKE_ACP_USAGE_SESSION_ID;
+const loadRequireCwd = process.env.FAKE_ACP_LOAD_REQUIRE_CWD;
 const modelConfig = process.env.FAKE_ACP_MODEL_CONFIG === "1";
 const modelsField = process.env.FAKE_ACP_MODELS_FIELD === "1";
 const thoughtLevelConfig = process.env.FAKE_ACP_THOUGHT_LEVEL_CONFIG === "1";
@@ -718,6 +721,22 @@ async function handleMessage(message) {
             jsonrpc: "2.0",
             id: message.id,
             error: { code: -32000, message: "session/load failed" },
+          });
+        } else if (
+          loadRequireCwd !== undefined &&
+          message.params?.cwd !== loadRequireCwd
+        ) {
+          // omp acp rejects restoring a stored session under a different cwd.
+          send({
+            jsonrpc: "2.0",
+            id: message.id,
+            error: {
+              code: -32603,
+              message: "Internal error",
+              data: {
+                details: `ACP session load was cancelled: ${message.params?.sessionId}`,
+              },
+            },
           });
         } else {
           activeSessionId = message.params?.sessionId;
