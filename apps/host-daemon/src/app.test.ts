@@ -1097,6 +1097,65 @@ describe("createHostDaemonApp", () => {
     }
   });
 
+  it("interrupts the server interaction when the runtime withdraws an interactive request", async () => {
+    const { app, fetchRecorder, runtimeOptions } = await createAppFixture();
+    try {
+      const workspacePath = await makeTempDir("bb-host-daemon-app-withdraw-");
+      await app.connection.start();
+      await app.runtimeManager.ensureEnvironment({
+        environmentId: "env-app-withdraw",
+        workspacePath,
+      });
+      const options = runtimeOptions.current;
+      if (!options?.onInteractiveRequest) {
+        throw new Error("Expected interactive request callback to be captured");
+      }
+
+      const request = createCommandApprovalRequest();
+      const controller = new AbortController();
+      const pending = options.onInteractiveRequest(request, controller.signal);
+      await vi.waitFor(() => {
+        expect(
+          fetchRecorder.requests.filter(
+            (record) =>
+              record.pathname === "/internal/session/interactive-request",
+          ),
+        ).toHaveLength(1);
+      });
+
+      controller.abort();
+
+      await expect(pending).rejects.toThrow(
+        "Provider withdrew the interactive request",
+      );
+      await vi.waitFor(() => {
+        expect(
+          fetchRecorder.requests.filter(
+            (record) =>
+              record.pathname ===
+              "/internal/session/interactive-request/interrupt",
+          ),
+        ).toHaveLength(1);
+      });
+      const interruptRequest = fetchRecorder.requests.find(
+        (record) =>
+          record.pathname === "/internal/session/interactive-request/interrupt",
+      );
+      expect(
+        hostDaemonInteractiveInterruptRequestSchema.parse(
+          JSON.parse(interruptRequest?.body ?? "{}"),
+        ),
+      ).toEqual({
+        sessionId: "session-app-test",
+        providerId: "codex",
+        threadIds: [request.threadId],
+        reason: "Provider withdrew the interactive request",
+      });
+    } finally {
+      await app.daemon.shutdown("test", 0);
+    }
+  });
+
   it("forwards the runtime cancellation signal through the daemon tool callback", async () => {
     let signal: AbortSignal | null | undefined;
     const { app, runtimeOptions } = await createAppFixture({

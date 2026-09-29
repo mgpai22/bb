@@ -10,11 +10,7 @@ import {
 } from "@bb/agent-runtime";
 import type { Logger } from "@bb/logger";
 import { sliceUtf16Tail } from "@bb/text-utils";
-import type {
-  PendingInteractionCreate,
-  PendingInteractionResolution,
-  ThreadEvent,
-} from "@bb/domain";
+import type { ThreadEvent } from "@bb/domain";
 import { threadScope, turnScope } from "@bb/domain";
 import type {
   HostDaemonActiveThread,
@@ -187,9 +183,7 @@ export interface RuntimeManagerOptions {
   onDataDirSkillsWatchError?: (args: {
     error: DataDirSkillsWatchError;
   }) => void;
-  onInteractiveRequest?: (
-    request: PendingInteractionCreate,
-  ) => Promise<PendingInteractionResolution>;
+  onInteractiveRequest?: AgentRuntimeOptions["onInteractiveRequest"];
   onToolCall?: AgentRuntimeOptions["onToolCall"];
   onStderr?: AgentRuntimeOptions["onStderr"];
   onProcessExit?: AgentRuntimeOptions["onProcessExit"];

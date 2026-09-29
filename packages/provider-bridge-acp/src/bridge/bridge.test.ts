@@ -2407,6 +2407,37 @@ describe("acp bridge", () => {
     expect(agentMessageTexts()).toContain("permission:no");
   });
 
+  it("withdraws a forwarded permission request when the turn is interrupted", async () => {
+    const { providerThreadId } = await startThread({
+      permissionMode: "accept-edits",
+      permissionEscalation: "ask",
+    });
+    const turnId = sendTurnRequest("turn/start", providerThreadId, {
+      input: [{ type: "text", text: "request-permission", mentions: [] }],
+    });
+    await waitForResponse(turnId);
+    const forwarded = await waitFor(
+      () =>
+        output.messages.find(
+          (message) =>
+            message.method === "interaction/request" &&
+            message.id !== undefined,
+        ),
+      "forwarded permission request",
+    );
+
+    await stopThread(providerThreadId);
+
+    expect(
+      output.messages.filter(
+        (message) => message.method === "notifications/cancelled",
+      ),
+    ).toEqual([
+      expect.objectContaining({ params: { requestId: forwarded.id } }),
+    ]);
+    startedProviderThreadIds.pop();
+  });
+
   it("presents an external-directory write permission as a file-change approval", async () => {
     const { providerThreadId } = await startThread({
       permissionMode: "accept-edits",
@@ -2760,6 +2791,36 @@ describe("acp bridge", () => {
       });
     });
 
+    it("keeps earlier batch answers when a later batch is submitted empty", async () => {
+      const properties = Object.fromEntries(
+        [0, 1, 2, 3, 4].map((index) => [
+          `q${index}`,
+          { type: "string", title: `Question ${index}` },
+        ]),
+      );
+      const first = await forwardElicitation({
+        message: "Answer 5 questions",
+        requestedSchema: { type: "object", properties },
+      });
+      answer(first, {
+        kind: "user_answer",
+        answers: { q0: { selected: [], freeText: "a" } },
+      });
+      const second = await waitFor(
+        () =>
+          notifications("interaction/request").find(
+            (message) => message.id !== first.id,
+          ),
+        "second question batch",
+      );
+      answer(second, { kind: "user_answer", answers: {} });
+
+      expect(await agentReceived()).toEqual({
+        action: "accept",
+        content: { q0: "a" },
+      });
+    });
+
     it("declines when the user submits no answers", async () => {
       const forwarded = await forwardElicitation({
         message: "Name?",
@@ -2838,6 +2899,13 @@ describe("acp bridge", () => {
       expect(
         readFileSync(elicitationLog, "utf8").split("\n").filter(Boolean),
       ).toEqual([JSON.stringify({ action: "cancel" })]);
+      expect(
+        output.messages.filter(
+          (message) => message.method === "notifications/cancelled",
+        ),
+      ).toEqual([
+        expect.objectContaining({ params: { requestId: forwarded.id } }),
+      ]);
     });
   });
 

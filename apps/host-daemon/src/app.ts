@@ -397,6 +397,13 @@ export async function createHostDaemonApp(
         threadIds: [request.threadId],
       });
     },
+    onWithdrawn: (request) => {
+      enqueueInteractiveInterrupt({
+        providerId: request.providerId,
+        reason: "Provider withdrew the interactive request",
+        threadIds: [request.threadId],
+      });
+    },
   });
 
   let sendServerMessage = (_message: HostDaemonDaemonWsMessage) => false;
@@ -545,10 +552,16 @@ export async function createHostDaemonApp(
         throw error;
       }
     },
-    onInteractiveRequest: async (request) => {
+    onInteractiveRequest: async (request, signal) => {
       try {
-        return await interactiveRequestRegistry.registerAndWait(request);
+        return await interactiveRequestRegistry.registerAndWait(
+          request,
+          signal,
+        );
       } catch (error) {
+        if (signal?.aborted) {
+          throw error;
+        }
         if (
           error instanceof InteractiveRequestRegistryError &&
           error.code === "interactive_request_rejected"

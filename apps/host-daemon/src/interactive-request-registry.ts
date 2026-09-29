@@ -25,6 +25,8 @@ interface InteractiveRequestRegistryOptions {
   onRegistrationFailure?: (
     failure: InteractiveRequestRegistrationFailure,
   ) => void;
+  /** A registered request the provider withdrew; the server row is stale. */
+  onWithdrawn?: (request: PendingInteractionCreate) => void;
   registerRequest: (
     request: PendingInteractionCreate,
   ) => Promise<HostDaemonInteractiveRequestResponse>;
@@ -105,6 +107,7 @@ export class InteractiveRequestRegistry {
 
   async registerAndWait(
     request: PendingInteractionCreate,
+    signal?: AbortSignal,
   ): Promise<PendingInteractionResolution> {
     const key = buildInteractiveRequestKey(request);
     const existing = this.pendingEntries.get(key);
@@ -130,6 +133,18 @@ export class InteractiveRequestRegistry {
       request,
     };
     this.pendingEntries.set(key, entry);
+    let registered = false;
+    const withdraw = () => {
+      if (this.pendingEntries.get(key) !== entry) return;
+      this.pendingEntries.delete(key);
+      entry.reject(new Error("Provider withdrew the interactive request"));
+      this.options.onWithdrawn?.(request);
+    };
+    // A mid-registration abort is handled once registration returns, so the
+    // server interrupt can never overtake the registration it withdraws.
+    signal?.addEventListener("abort", () => registered && withdraw(), {
+      once: true,
+    });
 
     try {
       const response = await this.options.registerRequest(request);
@@ -145,6 +160,7 @@ export class InteractiveRequestRegistry {
       }
 
       entry.interactionId = response.interactionId;
+      registered = true;
       if (response.status !== "pending" && response.status !== "resolving") {
         this.pendingEntries.delete(key);
         entry.reject(
@@ -152,6 +168,8 @@ export class InteractiveRequestRegistry {
             `Pending interaction ${response.interactionId} is already ${response.status}`,
           ),
         );
+      } else if (signal?.aborted) {
+        withdraw();
       }
     } catch (error) {
       this.pendingEntries.delete(key);

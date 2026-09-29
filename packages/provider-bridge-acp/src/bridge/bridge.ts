@@ -168,6 +168,8 @@ interface AcpSessionPolicy {
 interface PendingAcpClientRequest {
   responder: AcpAgentRequestResponder;
   cancelledResult: Record<string, unknown>;
+  /** Aborts the forwarded runtime request so bb withdraws the interaction. */
+  withdraw: AbortController;
 }
 
 interface PendingAcpPermission extends PendingAcpClientRequest {
@@ -361,10 +363,7 @@ function rememberGrokContextWindow(
   }
 }
 
-function emitGrokContextWindow(
-  session: AcpThreadSession,
-  used: number,
-): void {
+function emitGrokContextWindow(session: AcpThreadSession, used: number): void {
   if (
     session.dialect.id !== "grok" ||
     session.grokContextWindowSize === undefined
@@ -1454,6 +1453,7 @@ function respondPermission(
 function cancelPendingClientRequests(session: AcpThreadSession): void {
   for (const pending of session.pendingClientRequests) {
     pending.responder.result(pending.cancelledResult);
+    pending.withdraw.abort();
   }
   session.pendingClientRequests.clear();
 }
@@ -1502,6 +1502,7 @@ function handlePermissionRequest(
   const pending: PendingAcpPermission = {
     responder,
     cancelledResult: { outcome: { outcome: "cancelled" } },
+    withdraw: new AbortController(),
     options: parsed.data.options,
   };
 
@@ -1544,12 +1545,16 @@ function handlePermissionRequest(
     cwd: session.cwd,
     classifyToolCall: session.dialect.classifyToolCall,
   });
-  void sendRuntimeRequest(BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest, {
-    providerThreadId: session.providerThreadId,
-    threadId: session.bbThreadId,
-    turnId: null,
-    payload,
-  })
+  void sendRuntimeRequest(
+    BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest,
+    {
+      providerThreadId: session.providerThreadId,
+      threadId: session.bbThreadId,
+      turnId: null,
+      payload,
+    },
+    pending.withdraw.signal,
+  )
     .then((result) => {
       if (!session.pendingClientRequests.delete(pending)) {
         return;
@@ -1598,15 +1603,20 @@ function handleElicitationRequest(
   const pending: PendingAcpClientRequest = {
     responder,
     cancelledResult: { action: "cancel" },
+    withdraw: new AbortController(),
   };
   session.pendingClientRequests.add(pending);
   const ask = (payload: PendingInteractionPayload) =>
-    sendRuntimeRequest(BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest, {
-      providerThreadId: session.providerThreadId,
-      threadId: session.bbThreadId,
-      turnId: null,
-      payload,
-    }).then(
+    sendRuntimeRequest(
+      BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest,
+      {
+        providerThreadId: session.providerThreadId,
+        threadId: session.bbThreadId,
+        turnId: null,
+        payload,
+      },
+      pending.withdraw.signal,
+    ).then(
       (result) => pendingInteractionResolutionSchema.safeParse(result).data,
       () => undefined,
     );
@@ -1622,9 +1632,6 @@ function handleElicitationRequest(
       const batchAnswers = parseAcpElicitationAnswers(await ask(batch));
       if (batchAnswers === undefined) {
         return { action: "cancel" };
-      }
-      if (Object.keys(batchAnswers).length === 0) {
-        return { action: "decline" };
       }
       Object.assign(answers, batchAnswers);
     }

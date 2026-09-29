@@ -94,6 +94,9 @@ const OMP_PLAN_APPROVE = "Approve and execute";
 const OMP_PLAN_REFINE = "Refine plan";
 const OTHER_KEY_SUFFIX = "__other";
 const USE_DEFAULT_VALUE = "default";
+// Caps for agent-supplied forms: beyond these the ask is declined, not shown.
+const MAX_FIELDS = 16;
+const MAX_LISTED_OPTIONS = 50;
 const BOOLEAN_OPTIONS: ChoiceOption[] = [
   { value: "true", label: "Yes" },
   { value: "false", label: "No" },
@@ -114,17 +117,24 @@ function choiceOptions(
   if (source === undefined || source.length === 0) {
     return undefined;
   }
-  return source.map((entry) => {
+  const options = new Map<string, ChoiceOption>();
+  for (const entry of source) {
+    const value = typeof entry === "string" ? entry : entry.const;
+    if (value.trim() === "" || options.has(value)) {
+      continue;
+    }
     if (typeof entry === "string") {
-      return { value: entry, label: entry };
+      options.set(value, { value, label: value });
+      continue;
     }
     const description = nonBlank(entry.description);
-    return {
-      value: entry.const,
-      label: nonBlank(entry.title) ?? entry.const,
+    options.set(value, {
+      value,
+      label: nonBlank(entry.title) ?? value,
       ...(description === undefined ? {} : { description }),
-    };
-  });
+    });
+  }
+  return options.size === 0 ? undefined : [...options.values()];
 }
 
 function isPlanApproval(
@@ -179,8 +189,8 @@ function fieldFor(
       kind: "text",
       key,
       defaultText:
-        typeof property.default === "string"
-          ? nonBlank(property.default)
+        typeof property.default === "string" && property.default.trim() !== ""
+          ? property.default
           : undefined,
     };
   }
@@ -266,6 +276,10 @@ export function buildAcpElicitationRequest(
       !key.endsWith(OTHER_KEY_SUFFIX) ||
       properties[key.slice(0, -OTHER_KEY_SUFFIX.length)] === undefined,
   );
+  if (entries.length > MAX_FIELDS) {
+    return { kind: "unsupported" };
+  }
+  const message = entries.length === 1 ? nonBlank(params.message) : undefined;
   const fields: ElicitationField[] = [];
   const questions: PendingInteractionUserQuestionQuestion[] = [];
   for (const [key, property] of entries) {
@@ -274,12 +288,18 @@ export function buildAcpElicitationRequest(
         ? undefined
         : `${key}${OTHER_KEY_SUFFIX}`;
     const field = fieldFor(key, property, otherKey);
-    if (field === undefined) {
+    if (
+      field === undefined ||
+      (field.kind === "choice" && field.options.length > MAX_LISTED_OPTIONS)
+    ) {
       return { kind: "unsupported" };
     }
+    // A free-text-only OMP question carries its text in the message; the
+    // unpaired __other field's title is the generic "Other" label.
     const prompt =
+      (key.endsWith(OTHER_KEY_SUFFIX) ? message : undefined) ??
       nonBlank(property.title) ??
-      (entries.length === 1 ? nonBlank(params.message) : undefined) ??
+      message ??
       key;
     fields.push(field);
     questions.push(questionFor(field, property, prompt));

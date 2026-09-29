@@ -139,9 +139,96 @@ describe("buildAcpElicitationRequest", () => {
     ).toEqual({ action: "accept", content: { value: "new body" } });
   });
 
+  it("keeps the editor prefill byte-for-byte when the user uses the default", () => {
+    const prefill = "  indented body\n";
+    const request = questionsRequest(
+      { value: { type: "string", default: prefill } },
+      "Edit message",
+    );
+    expect(
+      acpQuestionsElicitationResponse(request.fields, {
+        value: { selected: ["default"] },
+      }),
+    ).toEqual({ action: "accept", content: { value: prefill } });
+    const blank = questionsRequest(
+      { value: { type: "string", default: "  \n" } },
+      "Edit message",
+    );
+    expect(blank.batches[0]).toEqual({
+      kind: "user_question",
+      questions: [
+        {
+          id: "value",
+          prompt: "Edit message",
+          multiSelect: false,
+          allowFreeText: true,
+        },
+      ],
+    });
+  });
+
+  it("drops blank option values and duplicate values", () => {
+    const request = questionsRequest({
+      q0: {
+        type: "string",
+        title: "Which?",
+        oneOf: [
+          { const: "a", title: "A" },
+          { const: " ", title: "Blank" },
+          { const: "a", title: "A again" },
+          { const: "b", title: "B" },
+        ],
+      },
+    });
+    expect(request.batches[0]).toMatchObject({
+      questions: [
+        {
+          options: [
+            { value: "a", label: "A" },
+            { value: "b", label: "B" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it.each([
+    ["16 fields", 16, 1, "questions"],
+    ["17 fields", 17, 1, "unsupported"],
+    ["50 options", 1, 50, "questions"],
+    ["51 options", 1, 51, "unsupported"],
+  ])("caps untrusted forms: %s", (_label, fieldCount, optionCount, kind) => {
+    const properties = Object.fromEntries(
+      Array.from({ length: fieldCount }, (_, field) => [
+        `q${field}`,
+        {
+          type: "string",
+          title: `Question ${field}`,
+          enum: Array.from(
+            { length: optionCount },
+            (_, option) => `option-${option}`,
+          ),
+        },
+      ]),
+    );
+    expect(
+      buildAcpElicitationRequest(
+        acpElicitationCreateParamsSchema.parse({
+          mode: "form",
+          sessionId: "s",
+          message: "Pick",
+          requestedSchema: { type: "object", properties },
+        }),
+      ).kind,
+    ).toBe(kind);
+  });
+
   it("asks a question that has only an other field as free text", () => {
     const request = questionsRequest({
       q0__other: { type: "string", title: "Other (type your own)" },
+    });
+    expect(request.batches[0]).toMatchObject({
+      questions: [{ id: "q0__other", prompt: "Pick" }],
     });
     expect(
       acpQuestionsElicitationResponse(request.fields, {

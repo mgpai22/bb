@@ -10,6 +10,7 @@ import type {
   ThreadEvent,
 } from "@bb/domain";
 import { promptTextInput } from "./test/prompt-input.js";
+import { createDeferredPromise } from "@bb/test-helpers";
 import { parseJsonRpcLine } from "@bb/provider-bridge-protocol/bridge-kit";
 import type { JsonRpcMessage } from "@bb/provider-bridge-protocol/bridge-kit";
 import { createProviderForId } from "./provider-registry.js";
@@ -106,6 +107,7 @@ async function answerDirectRequest(args: {
   try {
     handleRuntimeProviderRequest({
       toolCalls: new RuntimeToolCalls(),
+      interactiveRequests: new RuntimeToolCalls(),
       getActiveTurnId: args.getActiveTurnId ?? (() => "bb-turn-1"),
       getThreadExecutionOptions:
         args.getThreadExecutionOptions ?? (() => undefined),
@@ -356,6 +358,7 @@ describe("createAgentRuntime interactive requests", () => {
           availableDecisions: ["allow_once", "allow_for_session", "deny"],
         },
       }),
+      expect.any(AbortSignal),
     );
   });
 
@@ -569,6 +572,7 @@ describe("createAgentRuntime interactive requests", () => {
       expect.objectContaining({
         payload: expect.objectContaining({ kind: "secrets/secret-request" }),
       }),
+      expect.any(AbortSignal),
     );
     expect(answer).toMatchObject({
       jsonrpc: "2.0",
@@ -644,5 +648,58 @@ describe("createAgentRuntime interactive requests", () => {
       id: 81,
       error: { code: expect.any(Number) },
     });
+  });
+
+  it("aborts a forwarded interactive request the bridge cancelled and sends no answer", async () => {
+    const child = spawn(process.execPath, [
+      "-e",
+      "process.stdin.pipe(process.stdout)",
+    ]);
+    const adapter = createProviderForId("fake", {
+      additionalWorkspaceWriteRoots: [],
+      bridgeLaunch: createScriptedEchoLaunch(),
+    });
+    const [initialize] = adapter.buildPostInitializeRequests();
+    initialize?.onResult({
+      protocolVersion: 2,
+      capabilities: { grammarVersions: [3, 3] },
+    });
+    const interactiveRequests = new RuntimeToolCalls();
+    const pending = createDeferredPromise<PendingInteractionResolution>();
+    let signal: AbortSignal | undefined;
+    try {
+      handleRuntimeProviderRequest({
+        toolCalls: new RuntimeToolCalls(),
+        interactiveRequests,
+        getActiveTurnId: () => "bb-turn-1",
+        getThreadExecutionOptions: () => undefined,
+        onInteractiveRequest: (_request, requestSignal) => {
+          signal = requestSignal;
+          requestSignal?.addEventListener("abort", () =>
+            pending.reject(new Error("withdrawn")),
+          );
+          return pending.promise;
+        },
+        onToolCall: async () => ({ contentItems: [], success: true }),
+        parsedId: 92,
+        parsedMethod: "interaction/request",
+        providerProcess: { adapter, child, interactiveRequestScope: "scope-1" },
+        rawRequest: commandApprovalRequest(92),
+        resolveThreadId: () => "t1",
+      });
+      expect(signal?.aborted).toBe(false);
+
+      interactiveRequests.cancel("scope-1", 92);
+
+      expect(signal?.aborted).toBe(true);
+      await pending.promise.catch(() => undefined);
+      await new Promise(setImmediate);
+      // The child echoes stdin, so the first line it prints is the first write.
+      const firstLine = readChildStdoutLine(child);
+      child.stdin.write("sentinel\n");
+      expect((await firstLine).trim()).toBe("sentinel");
+    } finally {
+      child.kill();
+    }
   });
 });
