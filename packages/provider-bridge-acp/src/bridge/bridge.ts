@@ -244,6 +244,7 @@ const pendingRuntimeRequests = new Map<
 >();
 let runtimeRequestIdCounter = 0;
 let dynamicToolBridgePromise: Promise<AcpDynamicToolBridge> | null = null;
+let bridgeDataDir: string | null = null;
 
 const THREAD_STOP_CANCEL_TIMEOUT_MS = 4_000;
 
@@ -1723,6 +1724,9 @@ async function startAgentSession(
   const translator = createAcpDeltaTranslator({
     cwd: params.cwd,
     dialect,
+    ...(bridgeDataDir === null
+      ? {}
+      : { imageDir: resolve(bridgeDataDir, "generated-images") }),
   });
   translator.configureInjectedTools(
     (params.dynamicTools ?? []).map((tool) => ({
@@ -2871,6 +2875,9 @@ if (process.argv.includes("--mcp-stdio")) {
 
 export const experimental_providerBridge = experimental_defineProviderBridge({
   handleLine,
+  start: (context) => {
+    bridgeDataDir = context.dataDir;
+  },
   onClose: () => {
     void stopAllSessions().finally(() => {
       process.exit(0);

@@ -29,6 +29,15 @@ export function extractAcpContentText(
   return parsed.success ? parsed.data.text : undefined;
 }
 
+export const acpImageContentBlockSchema = z
+  .object({
+    type: z.literal("image"),
+    data: z.string(),
+    mimeType: z.string(),
+  })
+  .passthrough();
+export type AcpImageContentBlock = z.infer<typeof acpImageContentBlockSchema>;
+
 export const ACP_TOOL_KINDS = [
   "read",
   "edit",

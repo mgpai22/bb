@@ -389,9 +389,58 @@ export function compactionOutcomeForEndTurn(
     : { status: "failed", error: text };
 }
 
+// OMP sends no tool name over ACP; its `task` tool is recognized by the
+// single `{task, solutionSpace}` or batch `{context, tasks}` argument shape.
+const ompTaskItemSchema = z
+  .object({
+    agent: z.string().optional(),
+    task: z.string(),
+    solutionSpace: z.string(),
+  })
+  .passthrough();
+const ompTaskBatchSchema = z
+  .object({ context: z.string(), tasks: z.array(ompTaskItemSchema).min(1) })
+  .passthrough();
+const OMP_TASK_TOOL_TITLE = "task";
+
+function ompClassifyToolCall(
+  event: AcpToolCallUpdateEvent,
+): AcpClassifiedToolCall | undefined {
+  if (event.kind !== "other") {
+    return undefined;
+  }
+  const single = ompTaskItemSchema.safeParse(event.rawInput);
+  const batch = ompTaskBatchSchema.safeParse(event.rawInput);
+  if (!single.success && !batch.success) {
+    return undefined;
+  }
+  const label =
+    event.title !== undefined && event.title !== OMP_TASK_TOOL_TITLE
+      ? event.title
+      : batch.success
+        ? "Subagent tasks"
+        : "Subagent task";
+  const detail = batch.success
+    ? `${String(batch.data.tasks.length)} tasks`
+    : single.data?.agent;
+  return {
+    item: {
+      type: "delegation",
+      childRef: event.toolCallId,
+      label,
+      background: false,
+    },
+    presentation: delegationPresentation({
+      label,
+      ...(detail === undefined ? {} : { detail }),
+    }),
+  };
+}
+
 export const OMP_ACP_DIALECT: AcpDialect = {
   id: "omp",
   commandResult: ompCommandResult,
+  classifyToolCall: ompClassifyToolCall,
 };
 
 const openCodeCommandRawOutputSchema = z
