@@ -123,6 +123,7 @@ export const KNOWN_ACP_AGENTS: readonly AcpAgentDefinition[] = [
     fork: "tip",
     supportsServiceTier: false,
     reasoningLevels: ["none", "low", "medium", "high", "xhigh", "max"],
+    elicitation: true,
     launch: {
       displayName: "omp",
       command: "omp",

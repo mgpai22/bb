@@ -71,6 +71,11 @@
  * - FAKE_ACP_PROMPT_ERROR=1  → reject every session/prompt request
  * - FAKE_ACP_GROK_CONTEXT=1  → advertise Grok model _meta.totalContextTokens
  *                              and prompt-result _meta.usage
+ * - FAKE_ACP_ELICITATION     → JSON `{message, requestedSchema}` sent as a form
+ *                              `elicitation/create` by the "request-elicitation"
+ *                              prompts
+ * - FAKE_ACP_ELICITATION_LOG → "request-elicitation-detached" ends the turn
+ *                              without waiting and appends the late answer here
  * - FAKE_ACP_COMPACT_STOP_REASON
  *                            → stop reason returned for /compact
  */
@@ -414,6 +419,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function elicitationParams() {
+  return {
+    mode: "form",
+    sessionId: activeSessionId,
+    ...JSON.parse(process.env.FAKE_ACP_ELICITATION ?? "{}"),
+  };
+}
+
+function logElicitation(outcome) {
+  appendFileSync(
+    process.env.FAKE_ACP_ELICITATION_LOG,
+    `${JSON.stringify(outcome)}\n`,
+  );
+}
+
 function promptText(prompt) {
   return (Array.isArray(prompt) ? prompt : [])
     .filter((block) => block && block.type === "text")
@@ -528,6 +548,21 @@ async function handlePrompt(message) {
       outcome = "error";
     }
     notifyUpdate(messageChunk(`permission:${outcome}`));
+  } else if (text.includes("request-elicitation-detached")) {
+    // OMP's ask/plan dialog timed out locally: the elicitation stays open on
+    // the client while the turn ends. The late answer goes to a log file.
+    requestClient("elicitation/create", elicitationParams()).then(
+      (result) => logElicitation(result),
+      (error) => logElicitation({ error: error.message }),
+    );
+  } else if (text.includes("request-elicitation")) {
+    let outcome;
+    try {
+      outcome = await requestClient("elicitation/create", elicitationParams());
+    } catch (error) {
+      outcome = { error: error.message };
+    }
+    notifyUpdate(messageChunk(`elicitation:${JSON.stringify(outcome)}`));
   } else if (text.includes("write-file")) {
     try {
       const result = await requestClient("fs/write_text_file", {

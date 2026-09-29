@@ -70,6 +70,7 @@ export async function probeAcpAgent(
       requestAcpInitialize(connected, {
         parameterizedModelPicker: false,
         fsAccess: true,
+        elicitation: false,
       }),
       timeout,
     ]);

@@ -3,7 +3,21 @@ import {
   pendingInteractionResolutionSchema,
   reasoningEffortsForLevels,
 } from "@bb/domain";
-import type { AvailableModel, PromptInput, ReasoningLevel } from "@bb/domain";
+import type {
+  AvailableModel,
+  PendingInteractionPayload,
+  PendingInteractionUserAnswer,
+  PromptInput,
+  ReasoningLevel,
+} from "@bb/domain";
+import {
+  acpElicitationCreateParamsSchema,
+  acpPlanElicitationResponse,
+  acpQuestionsElicitationResponse,
+  buildAcpElicitationRequest,
+  parseAcpElicitationAnswers,
+  type AcpElicitationResponse,
+} from "../elicitation.js";
 import { acpLaunchSpecSchema, type AcpLaunchSpec } from "../launch-spec.js";
 import {
   BRIDGE_INBOUND_REQUEST_METHODS,
@@ -151,8 +165,12 @@ interface AcpSessionPolicy {
   workspaceWriteRoots: string[];
 }
 
-interface PendingAcpPermission {
+interface PendingAcpClientRequest {
   responder: AcpAgentRequestResponder;
+  cancelledResult: Record<string, unknown>;
+}
+
+interface PendingAcpPermission extends PendingAcpClientRequest {
   options: AcpPermissionOption[];
 }
 
@@ -222,7 +240,7 @@ interface AcpThreadSession {
   grokContextWindowSize: number | undefined;
   stopping: boolean;
   turnSettled: Promise<void> | undefined;
-  pendingPermissions: Set<PendingAcpPermission>;
+  pendingClientRequests: Set<PendingAcpClientRequest>;
   pendingToolCalls: Set<AbortController>;
   cursorMcpApproval: CursorMcpApproval | undefined;
   deferStartEmit: AcpDeferredStartEmitter | undefined;
@@ -907,6 +925,7 @@ async function loadSessionDiscoveredModels(
         const initializeResult = await requestAcpInitialize(connection, {
           parameterizedModelPicker,
           fsAccess: false,
+          elicitation: false,
         });
         await authenticateAcpAgent({
           connection,
@@ -1430,11 +1449,11 @@ function respondPermission(
   pending.responder.result({ outcome: { outcome: "selected", optionId } });
 }
 
-function cancelPendingPermissions(session: AcpThreadSession): void {
-  for (const pending of session.pendingPermissions) {
-    pending.responder.result({ outcome: { outcome: "cancelled" } });
+function cancelPendingClientRequests(session: AcpThreadSession): void {
+  for (const pending of session.pendingClientRequests) {
+    pending.responder.result(pending.cancelledResult);
   }
-  session.pendingPermissions.clear();
+  session.pendingClientRequests.clear();
 }
 
 function handlePermissionRequest(
@@ -1480,6 +1499,7 @@ function handlePermissionRequest(
       : undefined;
   const pending: PendingAcpPermission = {
     responder,
+    cancelledResult: { outcome: { outcome: "cancelled" } },
     options: parsed.data.options,
   };
 
@@ -1488,7 +1508,7 @@ function handlePermissionRequest(
     return;
   }
 
-  session.pendingPermissions.add(pending);
+  session.pendingClientRequests.add(pending);
 
   const normalizedToolCall =
     toolCall?.toolCallId !== undefined && bound !== undefined
@@ -1529,7 +1549,7 @@ function handlePermissionRequest(
     payload,
   })
     .then((result) => {
-      if (!session.pendingPermissions.delete(pending)) {
+      if (!session.pendingClientRequests.delete(pending)) {
         return;
       }
       const resolution = pendingInteractionResolutionSchema.safeParse(result);
@@ -1542,11 +1562,77 @@ function handlePermissionRequest(
       respondPermission(pending, response?.decision ?? null);
     })
     .catch(() => {
-      if (!session.pendingPermissions.delete(pending)) {
+      if (!session.pendingClientRequests.delete(pending)) {
         return;
       }
       respondPermission(pending, null);
     });
+}
+
+function handleElicitationRequest(
+  session: AcpThreadSession,
+  params: unknown,
+  responder: AcpAgentRequestResponder,
+): void {
+  const parsed = acpElicitationCreateParamsSchema.safeParse(params);
+  if (!parsed.success) {
+    responder.error(-32602, "Invalid elicitation/create params");
+    return;
+  }
+  if (
+    session.stopping ||
+    session.cancelRequested ||
+    session.activePromptKind !== "turn"
+  ) {
+    responder.result({ action: "cancel" });
+    return;
+  }
+  const request = buildAcpElicitationRequest(parsed.data);
+  if (request.kind === "unsupported") {
+    responder.result({ action: "decline" });
+    return;
+  }
+
+  const pending: PendingAcpClientRequest = {
+    responder,
+    cancelledResult: { action: "cancel" },
+  };
+  session.pendingClientRequests.add(pending);
+  const ask = (payload: PendingInteractionPayload) =>
+    sendRuntimeRequest(BRIDGE_INBOUND_REQUEST_METHODS.interactionRequest, {
+      providerThreadId: session.providerThreadId,
+      threadId: session.bbThreadId,
+      turnId: null,
+      payload,
+    }).then(
+      (result) => pendingInteractionResolutionSchema.safeParse(result).data,
+      () => undefined,
+    );
+  const resolveResponse = async (): Promise<AcpElicitationResponse> => {
+    if (request.kind === "plan") {
+      return acpPlanElicitationResponse(await ask(request.payload));
+    }
+    const answers: Record<string, PendingInteractionUserAnswer> = {};
+    for (const batch of request.batches) {
+      if (!session.pendingClientRequests.has(pending)) {
+        return { action: "cancel" };
+      }
+      const batchAnswers = parseAcpElicitationAnswers(await ask(batch));
+      if (batchAnswers === undefined) {
+        return { action: "cancel" };
+      }
+      if (Object.keys(batchAnswers).length === 0) {
+        return { action: "decline" };
+      }
+      Object.assign(answers, batchAnswers);
+    }
+    return acpQuestionsElicitationResponse(request.fields, answers);
+  };
+  void resolveResponse().then((response) => {
+    if (session.pendingClientRequests.delete(pending)) {
+      responder.result(response);
+    }
+  });
 }
 
 function isPathInsideRoots(targetPath: string, roots: string[]): boolean {
@@ -1774,7 +1860,7 @@ async function startAgentSession(
       handleAgentRequest(session, method, requestParams, responder),
     onExit: (info) => {
       const wasCurrent = sessionsByBbThreadId.get(bbThreadId) === session;
-      cancelPendingPermissions(session);
+      cancelPendingClientRequests(session);
       removeSession(session);
       if (!wasCurrent || session.stopping || session.providerThreadId === "") {
         return;
@@ -1814,7 +1900,7 @@ async function startAgentSession(
     grokContextWindowSize: undefined,
     stopping: false,
     turnSettled: undefined,
-    pendingPermissions: new Set(),
+    pendingClientRequests: new Set(),
     pendingToolCalls: new Set(),
     cursorMcpApproval: undefined,
     deferStartEmit: emitStartNotification,
@@ -1827,6 +1913,7 @@ async function startAgentSession(
     const initializeResult = await requestAcpInitialize(connection, {
       parameterizedModelPicker: params.parameterizedModelPicker,
       fsAccess: true,
+      elicitation: params.elicitation === true,
     });
     await authenticateAcpAgent({
       connection,
@@ -2010,7 +2097,7 @@ async function stopSession(session: AcpThreadSession): Promise<void> {
     session,
     "ACP session stopped before the steer was sent",
   );
-  cancelPendingPermissions(session);
+  cancelPendingClientRequests(session);
 
   if (session.activePromptKind !== null && !session.connection.exited) {
     session.connection.notify("session/cancel", {
@@ -2054,7 +2141,7 @@ async function releaseSession(session: AcpThreadSession): Promise<void> {
     session,
     "ACP session released before the steer was sent",
   );
-  cancelPendingPermissions(session);
+  cancelPendingClientRequests(session);
   session.connection.kill();
   removeSession(session);
   await releaseCursorMcpApproval(session);
@@ -2070,7 +2157,7 @@ function requestSteerCancel(session: AcpThreadSession): void {
     return;
   }
   session.cancelRequested = true;
-  cancelPendingPermissions(session);
+  cancelPendingClientRequests(session);
   session.connection.notify("session/cancel", {
     sessionId: session.providerThreadId,
   });
@@ -2118,6 +2205,7 @@ function finishTurn(
     return;
   }
   for (const controller of session.pendingToolCalls) controller.abort();
+  cancelPendingClientRequests(session);
   session.activePromptKind = null;
   dropQueuedTurnInputs(session, "ACP turn ended before the steer was sent");
   session.promptRequestPending = false;
@@ -2182,6 +2270,7 @@ function runTurn(
             error instanceof Error ? error.message : String(error),
           );
         }
+        cancelPendingClientRequests(session);
         session.activePromptKind = null;
         return;
       }
@@ -2283,6 +2372,13 @@ function handleAgentRequest(
       return;
     case "fs/write_text_file":
       void handleFsWriteTextFile(session, params, responder);
+      return;
+    case "elicitation/create":
+      if (session.construction.elicitation === true) {
+        handleElicitationRequest(session, params, responder);
+      } else {
+        handleDialectRequest(session, method, params, responder);
+      }
       return;
     default:
       handleDialectRequest(session, method, params, responder);
@@ -2487,6 +2583,7 @@ const acpProviderOptionsSchema = z
     additionalWorkspaceWriteRoots: z.array(z.string()).optional(),
     acpDialect: z.string().min(1).optional(),
     parameterizedModelPicker: z.boolean().optional(),
+    elicitation: z.boolean().optional(),
     primaryModels: z.array(z.string().min(1)).optional(),
     reasoningProbePriorityModelIds: z.array(z.string().min(1)).optional(),
   })
@@ -2664,6 +2761,9 @@ async function handleRequest(
           skillRoots: configuredSkillRoots ?? undefined,
         },
         parameterizedModelPicker: modelPicker.parameterizedModelPicker,
+        elicitation:
+          acpProviderOptionsSchema.parse(params.options.providerOptions ?? {})
+            .elicitation === true,
         launchSpec,
         providerLabel: launchSpec.displayName,
         threadId: params.threadId,

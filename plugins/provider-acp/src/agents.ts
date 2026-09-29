@@ -19,6 +19,7 @@ export interface AcpAgentDefinition {
   launch: AcpLaunchSpec;
   dialect?: string;
   parameterizedModelPicker?: boolean;
+  elicitation?: boolean;
   primaryModels?: readonly string[];
   reasoningProbePriorityModelIds?: readonly string[];
   visibility?: "always" | "installed";
