@@ -1,7 +1,7 @@
 import { operationEnvironment } from "./operation-environment.js";
 import {
+  hostThreadCommands,
   readAdvertisedThreadCommands,
-  writeAdvertisedThreadCommands,
 } from "./thread-commands-cache.js";
 import {
   runEnvironmentHook,
@@ -655,32 +655,22 @@ const onlineRpcHandlers: OnlineRpcHandlerMap = {
   "host.list_commands": listHostCommands,
   "host.list_skills": listHostSkills,
   "thread.commands": async (command, options) => {
-    const owners = options.runtimeManager.listThreadOwnerEntries(
+    const owner = options.runtimeManager.listThreadOwnerEntries(
       command.threadId,
-    );
-    const owner = owners[0];
+    )[0];
     if (owner) {
       const result = await owner.runtime.listThreadCommands({
         threadId: command.threadId,
       });
-      const commands = result.commands.map((entry) => ({
-        name: entry.name,
-        source: "command" as const,
-        origin: "project" as const,
-        description: entry.description,
-        argumentHint: entry.argumentHint,
-      }));
       if (result.advertised) {
-        await writeAdvertisedThreadCommands({
-          threadStorageRootPath: options.threadStorageRootPath,
-          threadId: command.threadId,
-          commands,
-        }).catch(() => undefined);
-        return { commands, advertised: true };
+        return {
+          commands: hostThreadCommands(result.commands),
+          advertised: true,
+        };
       }
     }
     const cached = await readAdvertisedThreadCommands({
-      threadStorageRootPath: options.threadStorageRootPath,
+      dataDir: options.dataDir,
       threadId: command.threadId,
     }).catch(() => null);
     if (cached !== null) {

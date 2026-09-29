@@ -2,16 +2,17 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HostProviderCommand } from "@bb/host-daemon-contract";
+import type { ThreadCommand } from "@bb/provider-bridge-protocol";
 import {
+  deleteAdvertisedThreadCommands,
   readAdvertisedThreadCommands,
   writeAdvertisedThreadCommands,
 } from "./thread-commands-cache.js";
 
 const tempDirs: string[] = [];
 
-async function makeTempDir(prefix: string): Promise<string> {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
+async function makeDataDir(): Promise<string> {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bb-thread-commands-"));
   tempDirs.push(dir);
   return dir;
 }
@@ -26,37 +27,43 @@ afterEach(async () => {
 
 function command(
   name: string,
-  overrides: Partial<HostProviderCommand> = {},
-): HostProviderCommand {
+  overrides: Partial<ThreadCommand> = {},
+): ThreadCommand {
   return {
     name,
-    source: "command",
-    origin: "project",
     description: overrides.description ?? null,
     argumentHint: overrides.argumentHint ?? null,
   };
 }
 
+function hostCommand(entry: ThreadCommand) {
+  return { ...entry, source: "command", origin: "project" };
+}
+
+async function writeRawCacheFile(
+  dataDir: string,
+  threadId: string,
+  contents: string,
+): Promise<void> {
+  await fs.mkdir(path.join(dataDir, "thread-commands"), { recursive: true });
+  await fs.writeFile(
+    path.join(dataDir, "thread-commands", `${threadId}.json`),
+    contents,
+    "utf8",
+  );
+}
+
 describe("advertised thread commands cache", () => {
   it("reports a miss when nothing was persisted", async () => {
-    const root = path.join(
-      await makeTempDir("bb-thread-commands-cache-"),
-      "thread-storage",
-    );
+    const dataDir = await makeDataDir();
 
     await expect(
-      readAdvertisedThreadCommands({
-        threadStorageRootPath: root,
-        threadId: "thr_missing",
-      }),
+      readAdvertisedThreadCommands({ dataDir, threadId: "thr_missing" }),
     ).resolves.toBeNull();
   });
 
-  it("round-trips a persisted command set", async () => {
-    const root = path.join(
-      await makeTempDir("bb-thread-commands-cache-"),
-      "thread-storage",
-    );
+  it("round-trips a persisted command set outside thread storage", async () => {
+    const dataDir = await makeDataDir();
     const commands = [
       command("ui-check", {
         description: "Run UI verification checks",
@@ -66,48 +73,35 @@ describe("advertised thread commands cache", () => {
     ];
 
     await writeAdvertisedThreadCommands({
-      threadStorageRootPath: root,
+      dataDir,
       threadId: "thr_1",
       commands,
     });
 
     await expect(
-      readAdvertisedThreadCommands({
-        threadStorageRootPath: root,
-        threadId: "thr_1",
-      }),
-    ).resolves.toEqual(commands);
+      readAdvertisedThreadCommands({ dataDir, threadId: "thr_1" }),
+    ).resolves.toEqual(commands.map(hostCommand));
+    await expect(
+      fs.readdir(path.join(dataDir, "thread-commands")),
+    ).resolves.toEqual(["thr_1.json"]);
   });
 
   it("round-trips an advertised empty set as a hit", async () => {
-    const root = path.join(
-      await makeTempDir("bb-thread-commands-cache-"),
-      "thread-storage",
-    );
+    const dataDir = await makeDataDir();
 
     await writeAdvertisedThreadCommands({
-      threadStorageRootPath: root,
+      dataDir,
       threadId: "thr_1",
       commands: [],
     });
 
     await expect(
-      readAdvertisedThreadCommands({
-        threadStorageRootPath: root,
-        threadId: "thr_1",
-      }),
+      readAdvertisedThreadCommands({ dataDir, threadId: "thr_1" }),
     ).resolves.toEqual([]);
   });
 
   it("replaces a stale set on refresh", async () => {
-    const root = path.join(
-      await makeTempDir("bb-thread-commands-cache-"),
-      "thread-storage",
-    );
-    const args = {
-      threadStorageRootPath: root,
-      threadId: "thr_1",
-    };
+    const args = { dataDir: await makeDataDir(), threadId: "thr_1" };
 
     await writeAdvertisedThreadCommands({
       ...args,
@@ -119,89 +113,87 @@ describe("advertised thread commands cache", () => {
     });
 
     await expect(readAdvertisedThreadCommands(args)).resolves.toEqual([
-      command("new"),
+      hostCommand(command("new")),
     ]);
   });
 
-  it("scopes persisted sets per thread", async () => {
-    const root = path.join(
-      await makeTempDir("bb-thread-commands-cache-"),
-      "thread-storage",
-    );
-
+  it("scopes persisted sets per thread and deletes one thread's set", async () => {
+    const dataDir = await makeDataDir();
     await writeAdvertisedThreadCommands({
-      threadStorageRootPath: root,
+      dataDir,
       threadId: "thr_1",
       commands: [command("ui-check")],
     });
-
-    await expect(
-      readAdvertisedThreadCommands({
-        threadStorageRootPath: root,
-        threadId: "thr_2",
-      }),
-    ).resolves.toBeNull();
-  });
-
-  it("treats a corrupt file as a miss", async () => {
-    const root = path.join(
-      await makeTempDir("bb-thread-commands-cache-"),
-      "thread-storage",
-    );
     await writeAdvertisedThreadCommands({
-      threadStorageRootPath: root,
-      threadId: "thr_1",
-      commands: [command("ui-check")],
+      dataDir,
+      threadId: "thr_2",
+      commands: [command("jobs")],
     });
-    await fs.writeFile(
-      path.join(root, "thr_1", "advertised-commands.json"),
-      "{not json",
-      "utf8",
-    );
+
+    await deleteAdvertisedThreadCommands({ dataDir, threadId: "thr_1" });
 
     await expect(
-      readAdvertisedThreadCommands({
-        threadStorageRootPath: root,
-        threadId: "thr_1",
-      }),
+      readAdvertisedThreadCommands({ dataDir, threadId: "thr_1" }),
     ).resolves.toBeNull();
+    await expect(
+      readAdvertisedThreadCommands({ dataDir, threadId: "thr_2" }),
+    ).resolves.toEqual([hostCommand(command("jobs"))]);
   });
 
-  it("treats a schema-violating file as a miss", async () => {
-    const root = path.join(
-      await makeTempDir("bb-thread-commands-cache-"),
-      "thread-storage",
-    );
-    await fs.mkdir(path.join(root, "thr_1"), { recursive: true });
-    await fs.writeFile(
-      path.join(root, "thr_1", "advertised-commands.json"),
+  it("treats corrupt, schema-violating, and oversized files as a miss", async () => {
+    const dataDir = await makeDataDir();
+    await writeRawCacheFile(dataDir, "corrupt", "{not json");
+    await writeRawCacheFile(
+      dataDir,
+      "invalid",
       JSON.stringify({ commands: [{ description: "Missing name" }] }),
-      "utf8",
+    );
+    await writeRawCacheFile(
+      dataDir,
+      "oversized",
+      JSON.stringify({
+        commands: [
+          hostCommand(command("big", { description: "x".repeat(300_000) })),
+        ],
+      }),
     );
 
-    await expect(
-      readAdvertisedThreadCommands({
-        threadStorageRootPath: root,
-        threadId: "thr_1",
-      }),
-    ).resolves.toBeNull();
+    for (const threadId of ["corrupt", "invalid", "oversized"]) {
+      await expect(
+        readAdvertisedThreadCommands({ dataDir, threadId }),
+      ).resolves.toBeNull();
+    }
   });
 
-  it("rejects thread ids that escape the storage root", async () => {
-    const root = path.join(
-      await makeTempDir("bb-thread-commands-cache-"),
-      "thread-storage",
+  it("caps the number of commands read from disk", async () => {
+    const dataDir = await makeDataDir();
+    await writeRawCacheFile(
+      dataDir,
+      "thr_1",
+      JSON.stringify({
+        commands: Array.from({ length: 250 }, (_, index) =>
+          hostCommand(command(`c${index}`)),
+        ),
+      }),
     );
 
+    const cached = await readAdvertisedThreadCommands({
+      dataDir,
+      threadId: "thr_1",
+    });
+    expect(cached).toHaveLength(200);
+    expect(cached?.[0]?.name).toBe("c0");
+  });
+
+  it("rejects thread ids that escape the cache directory", async () => {
+    const dataDir = await makeDataDir();
+
     await expect(
-      readAdvertisedThreadCommands({
-        threadStorageRootPath: root,
-        threadId: "../escape",
-      }),
+      readAdvertisedThreadCommands({ dataDir, threadId: "../escape" }),
     ).resolves.toBeNull();
     await expect(
       writeAdvertisedThreadCommands({
-        threadStorageRootPath: root,
+        dataDir,
         threadId: "../escape",
         commands: [],
       }),

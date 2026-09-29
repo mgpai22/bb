@@ -169,4 +169,47 @@ describe("buildCommandListResponse", () => {
     ]);
     expect(response.commands.map((command) => command.name)).toContain("jobs");
   });
+
+  it("drops advertised skill commands that duplicate a skill catalog entry", () => {
+    const response = buildCommandListResponse({
+      commands: [],
+      advertisedCommands: [
+        {
+          name: "skill:review",
+          source: "command",
+          origin: "project",
+          description: "Review the current change",
+          argumentHint: "arguments",
+        },
+        {
+          name: "skill:other",
+          source: "command",
+          origin: "project",
+          description: null,
+          argumentHint: "arguments",
+        },
+      ],
+      includeBuiltinCompact: false,
+      skillCatalog: [
+        {
+          provenance: { kind: "plugin", pluginId: "ottonomous" },
+          runtimeSource: {
+            kind: "tree",
+            sourceType: "data-dir",
+            name: "review",
+            description: "Review the current change",
+            treeHash: "abc123",
+            entryPath: "SKILL.md",
+          },
+        },
+      ],
+    });
+
+    const keys = response.commands.map(
+      (command) => `${command.source} ${command.name}`,
+    );
+    expect(keys).toContain("skill review");
+    expect(keys).toContain("command skill:other");
+    expect(keys).not.toContain("command skill:review");
+  });
 });

@@ -333,6 +333,7 @@
     "provider/raw",
     "provider/recovery",
     "session/replaced",
+    "thread/commands/updated",
     "thread/identity"
   ],
   "inboundRequestMethods": [

@@ -379,9 +379,11 @@ const threadGoalClearCommandSchema = hostDaemonThreadTargetSchema
   })
   .strict();
 
-const threadCommandsCommandSchema = hostDaemonThreadTargetSchema.extend({
-  type: z.literal("thread.commands"),
-});
+const threadCommandsCommandSchema = hostDaemonThreadTargetSchema
+  .extend({
+    type: z.literal("thread.commands"),
+  })
+  .strict();
 
 const threadPlanCancelCommandSchema = hostDaemonThreadTargetSchema
   .extend({

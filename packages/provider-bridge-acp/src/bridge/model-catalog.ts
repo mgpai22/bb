@@ -200,8 +200,9 @@ export function buildAcpNativeReasoningSupport(
     defaultReasoningEffort:
       currentLevel !== undefined && supportedLevels.includes(currentLevel)
         ? currentLevel
-        : (supportedLevels.find((level) => level !== "none") ??
-          supportedLevels[0]),
+        : matchedValueByLevel.get(supportedLevels[0]) === "off"
+          ? (supportedLevels[1] ?? supportedLevels[0])
+          : supportedLevels[0],
   };
 }
 

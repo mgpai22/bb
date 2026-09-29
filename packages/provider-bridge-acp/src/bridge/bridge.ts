@@ -211,8 +211,12 @@ function normalizeAdvertisedCommands(
     }
     const description =
       typeof record["description"] === "string" ? record["description"] : null;
-    const argumentHint =
-      typeof record["inputHint"] === "string" ? record["inputHint"] : null;
+    const input = record["input"];
+    const hint =
+      typeof input === "object" && input !== null
+        ? (input as Record<string, unknown>)["hint"]
+        : undefined;
+    const argumentHint = typeof hint === "string" ? hint : null;
     commands.push({ name, description, argumentHint });
     if (commands.length >= MAX_ACP_ADVERTISED_COMMANDS) {
       break;
@@ -1236,6 +1240,7 @@ async function selectAcpNativeModel(args: {
       args.models?.currentModelId !== selection.modelId);
   if (shouldSetModel) {
     let configState: AcpConfigStateResult | null = null;
+    let configOptionError: unknown;
     let setModel = true;
     if (modelOption) {
       try {
@@ -1253,14 +1258,19 @@ async function selectAcpNativeModel(args: {
         if (args.models === undefined) {
           throw error;
         }
+        configOptionError = error;
       }
     }
     if (setModel) {
-      configState = await args.connection.request({
-        method: "session/set_model",
-        params: { sessionId: args.sessionId, modelId: selection.modelId },
-        resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
-      });
+      try {
+        configState = await args.connection.request({
+          method: "session/set_model",
+          params: { sessionId: args.sessionId, modelId: selection.modelId },
+          resultSchema: z.union([acpConfigStateResultSchema, z.null()]),
+        });
+      } catch (error) {
+        throw configOptionError ?? error;
+      }
     }
     configOptions = configState?.configOptions ?? configOptions;
   }
@@ -1293,8 +1303,9 @@ async function selectAcpNativeReasoning(args: {
   if (reasoningLevel === undefined) {
     return;
   }
+  const advertisedOption = findAcpThoughtLevelConfigOption(args.configOptions);
   const thoughtLevelOption =
-    findAcpThoughtLevelConfigOption(args.configOptions) ??
+    advertisedOption ??
     nativeReasoningToThoughtLevelOption(args.nativeReasoning);
   if (!thoughtLevelOption) {
     return;
@@ -1306,15 +1317,21 @@ async function selectAcpNativeReasoning(args: {
   if (value === undefined) {
     return;
   }
-  await args.connection.request({
-    method: "session/set_config_option",
-    params: {
-      sessionId: args.sessionId,
-      configId: thoughtLevelOption.id,
-      value,
-    },
-    resultSchema: acpConfigStateResultSchema,
-  });
+  try {
+    await args.connection.request({
+      method: "session/set_config_option",
+      params: {
+        sessionId: args.sessionId,
+        configId: thoughtLevelOption.id,
+        value,
+      },
+      resultSchema: acpConfigStateResultSchema,
+    });
+  } catch (error) {
+    if (advertisedOption !== undefined) {
+      throw error;
+    }
+  }
 }
 
 async function selectAcpNativeServiceTier(args: {
@@ -2456,6 +2473,10 @@ function handleAgentNotification(
     if (advertised !== undefined) {
       session.availableCommands = advertised;
       session.availableCommandsAdvertised = true;
+      sendNotification(BRIDGE_NOTIFICATION_METHODS.threadCommands, {
+        threadId: session.bbThreadId,
+        commands: advertised,
+      });
     }
   };
   if (session.providerThreadId === "") {

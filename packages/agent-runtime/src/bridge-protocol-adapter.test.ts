@@ -496,6 +496,29 @@ describe("provider/recovery", () => {
   });
 });
 
+describe("thread/commands/updated", () => {
+  it("decodes advertised commands and drops malformed payloads", () => {
+    const adapter = makeAdapter();
+    const commands = [
+      { name: "jobs", description: "List jobs", argumentHint: null },
+    ];
+    expect(
+      adapter.decodeThreadCommands({
+        jsonrpc: "2.0",
+        method: "thread/commands/updated",
+        params: { threadId: "thr_1", commands },
+      }),
+    ).toEqual({ threadId: "thr_1", commands });
+    expect(
+      adapter.decodeThreadCommands({
+        jsonrpc: "2.0",
+        method: "thread/commands/updated",
+        params: { threadId: "thr_1", commands: [{ description: "x" }] },
+      }),
+    ).toBeNull();
+  });
+});
+
 describe("inbound request decoding", () => {
   it("decodes canonical tool calls and rejects other methods", () => {
     const adapter = makeAdapter();
