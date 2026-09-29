@@ -373,17 +373,14 @@ export function createBridgeProtocolAdapter(
             },
           };
         case "thread/commands":
-          return gate(
-            "threadCommands",
-            {
-              kind: "request",
-              method: BRIDGE_REQUEST_METHODS.threadCommands,
-              params: {
-                threadId: command.threadId,
-                providerThreadId: command.providerThreadId,
-              },
+          return gate("threadCommands", {
+            kind: "request",
+            method: BRIDGE_REQUEST_METHODS.threadCommands,
+            params: {
+              threadId: command.threadId,
+              providerThreadId: command.providerThreadId,
             },
-          );
+          });
         case "thread/name/set":
           return gate("threadRename", {
             kind: "request",

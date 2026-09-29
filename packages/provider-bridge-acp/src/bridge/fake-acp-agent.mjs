@@ -613,7 +613,10 @@ async function handlePrompt(message) {
       messageChunk(`mcp-server-config:${JSON.stringify(currentMcpServers)}`),
     );
   } else if (text.includes("advertise-commands-empty")) {
-    notifyUpdate({ sessionUpdate: "available_commands_update", availableCommands: [] });
+    notifyUpdate({
+      sessionUpdate: "available_commands_update",
+      availableCommands: [],
+    });
     notifyUpdate(messageChunk(`echo:${text}`));
   } else if (text.includes("advertise-commands-malformed")) {
     notifyUpdate({
@@ -624,7 +627,11 @@ async function handlePrompt(message) {
         { name: "" },
         { name: "has space" },
         42,
-        { name: "/slashy", description: "Leading slash", inputHint: "<target>" },
+        {
+          name: "/slashy",
+          description: "Leading slash",
+          inputHint: "<target>",
+        },
       ],
     });
     notifyUpdate(messageChunk(`echo:${text}`));

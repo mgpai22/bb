@@ -59,8 +59,7 @@ export async function readAdvertisedThreadCommands(args: {
   } catch {
     return null;
   }
-  const validated =
-    advertisedThreadCommandsFileSchema.safeParse(parsed);
+  const validated = advertisedThreadCommandsFileSchema.safeParse(parsed);
   if (!validated.success) {
     return null;
   }

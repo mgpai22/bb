@@ -319,9 +319,8 @@ export function acpPlanElicitationResponse(
 export function parseAcpElicitationAnswers(
   resolution: PendingInteractionResolution | undefined,
 ): Record<string, PendingInteractionUserAnswer> | undefined {
-  const parsed = userQuestionPendingInteractionResolutionSchema.safeParse(
-    resolution,
-  );
+  const parsed =
+    userQuestionPendingInteractionResolutionSchema.safeParse(resolution);
   return parsed.success ? parsed.data.answers : undefined;
 }
 

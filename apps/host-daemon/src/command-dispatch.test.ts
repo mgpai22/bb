@@ -178,14 +178,16 @@ function createRuntime(): FakeDispatchRuntime {
     }),
     clearThreadGoal: vi.fn(async () => ({ cleared: true })),
     renameThread: vi.fn(async () => undefined),
-    listThreadCommands: vi.fn(async (): Promise<{
-      commands: {
-        name: string;
-        description: string | null;
-        argumentHint: string | null;
-      }[];
-      advertised: boolean;
-    }> => ({ commands: [], advertised: false })),
+    listThreadCommands: vi.fn(
+      async (): Promise<{
+        commands: {
+          name: string;
+          description: string | null;
+          argumentHint: string | null;
+        }[];
+        advertised: boolean;
+      }> => ({ commands: [], advertised: false }),
+    ),
     archiveThread: vi.fn(async () => undefined),
     unarchiveThread: vi.fn(async () => undefined),
     listModels: vi.fn(async () => ({

@@ -793,17 +793,17 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       await Promise.all([
         listProviderCommands(),
         listAdvertisedCommands(),
-      workspace.cwd === null
-        ? Promise.resolve([])
-        : resolveWorkspaceProjectSkills(deps, {
-            hostId: workspace.hostId,
-            workspacePath: workspace.cwd,
-          }),
-      resolveSharedSkills(deps, {
-        hostId: workspace.hostId,
-        cwd: workspace.cwd,
-      }),
-    ]);
+        workspace.cwd === null
+          ? Promise.resolve([])
+          : resolveWorkspaceProjectSkills(deps, {
+              hostId: workspace.hostId,
+              workspacePath: workspace.cwd,
+            }),
+        resolveSharedSkills(deps, {
+          hostId: workspace.hostId,
+          cwd: workspace.cwd,
+        }),
+      ]);
     const skillCatalog = resolveSkillCatalog(deps, {
       projectSkillSources,
       sharedSkillSources: sharedSkills.runtimeSources,

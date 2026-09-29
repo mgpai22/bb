@@ -187,7 +187,9 @@ interface AcpAdvertisedCommand {
 
 const MAX_ACP_ADVERTISED_COMMANDS = 200;
 
-function normalizeAdvertisedCommands(update: unknown): AcpAdvertisedCommand[] | undefined {
+function normalizeAdvertisedCommands(
+  update: unknown,
+): AcpAdvertisedCommand[] | undefined {
   const parsed = acpAvailableCommandsUpdateSchema.safeParse(update);
   if (!parsed.success) {
     return undefined;

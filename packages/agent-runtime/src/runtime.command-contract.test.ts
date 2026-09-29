@@ -775,7 +775,9 @@ describe("createAgentRuntime command contracts", () => {
         providerId: "fake",
         options: fullRuntimeOptions,
       });
-      await expect(runtime.listThreadCommands({ threadId: "t1" })).resolves.toEqual({
+      await expect(
+        runtime.listThreadCommands({ threadId: "t1" }),
+      ).resolves.toEqual({
         commands: [],
         advertised: false,
       });

@@ -1,7 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { PROMPT_ATTACHMENT_MAX_BYTES, providerRawEventSchema } from "@bb/domain";
+import {
+  PROMPT_ATTACHMENT_MAX_BYTES,
+  providerRawEventSchema,
+} from "@bb/domain";
 import type { ProviderRawEvent } from "@bb/domain";
 import {
   COMPACTION_PRESENTATION,

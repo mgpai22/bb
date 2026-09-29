@@ -120,7 +120,10 @@ function registerCommandRpc(
       }
       if (request.command.type === "thread.commands") {
         stub.threadCommandsRequests.push(request);
-        return { ok: true, result: { commands: stub.threadCommands, advertised: true } };
+        return {
+          ok: true,
+          result: { commands: stub.threadCommands, advertised: true },
+        };
       }
       if (request.command.type === "host.list_skills") {
         stub.skillRequests.push(request);
@@ -280,7 +283,6 @@ describe("public project command typeahead route", () => {
       });
     });
   });
-
 
   it("passes a provider's declared native skill roots to the target host", async () => {
     await withTestHarness(

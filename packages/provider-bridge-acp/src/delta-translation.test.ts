@@ -631,7 +631,9 @@ describe("acp delta translation (moved from the legacy adapter suite)", () => {
       );
 
       expect(
-        completedItems(harness.translate(ompImageChunk(oversized, "image/png"))),
+        completedItems(
+          harness.translate(ompImageChunk(oversized, "image/png")),
+        ),
       ).toEqual([
         expect.objectContaining({
           type: "imageGeneration",
@@ -2683,7 +2685,9 @@ describe("acp delta translation (dialects)", () => {
           details: {
             results: [],
             totalDurationMs: 10,
-            progress: [{ id: "0-Explore", agent: "explore", status: "running" }],
+            progress: [
+              { id: "0-Explore", agent: "explore", status: "running" },
+            ],
           },
         },
       }),
@@ -2696,7 +2700,9 @@ describe("acp delta translation (dialects)", () => {
             toolCallId: "toolu_omp_task",
             status: "completed",
             rawOutput: {
-              content: [{ type: "text", text: "Retry lives in src/net/retry.ts" }],
+              content: [
+                { type: "text", text: "Retry lives in src/net/retry.ts" },
+              ],
               details: {
                 results: [{ id: "0-Explore", agent: "explore", exitCode: 0 }],
                 totalDurationMs: 4200,

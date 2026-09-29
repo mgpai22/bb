@@ -154,7 +154,6 @@ describe("handshake gating", () => {
     });
   });
 
-
   it("moves approval policy ownership per the handshake", () => {
     const adapter = makeAdapter();
     expect(adapter.approvalEnforcedBy).toBe("runtime");

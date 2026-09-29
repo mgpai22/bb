@@ -109,8 +109,14 @@ describe("advertised thread commands cache", () => {
       threadId: "thr_1",
     };
 
-    await writeAdvertisedThreadCommands({ ...args, commands: [command("old")] });
-    await writeAdvertisedThreadCommands({ ...args, commands: [command("new")] });
+    await writeAdvertisedThreadCommands({
+      ...args,
+      commands: [command("old")],
+    });
+    await writeAdvertisedThreadCommands({
+      ...args,
+      commands: [command("new")],
+    });
 
     await expect(readAdvertisedThreadCommands(args)).resolves.toEqual([
       command("new"),

@@ -1634,7 +1634,10 @@ describe("acp bridge", () => {
   });
 
   it("serves advertised available_commands_update via thread/commands", async () => {
-    async function threadCommands(bbThreadId: string, providerThreadId: string) {
+    async function threadCommands(
+      bbThreadId: string,
+      providerThreadId: string,
+    ) {
       const id = sendRequest("thread/commands", {
         threadId: bbThreadId,
         providerThreadId,
@@ -1679,7 +1682,10 @@ describe("acp bridge", () => {
     const first = await startThread();
     const second = await startThread();
 
-    async function threadCommands(bbThreadId: string, providerThreadId: string) {
+    async function threadCommands(
+      bbThreadId: string,
+      providerThreadId: string,
+    ) {
       const id = sendRequest("thread/commands", {
         threadId: bbThreadId,
         providerThreadId,
@@ -1727,8 +1733,7 @@ describe("acp bridge", () => {
       });
       await waitForResponse(turnId);
       await waitFor(
-        () =>
-          agentMessageTexts().includes(`echo:${text}`) ? true : undefined,
+        () => (agentMessageTexts().includes(`echo:${text}`) ? true : undefined),
         `echo for ${text}`,
       );
       await waitForTurnCompleted();
@@ -2692,7 +2697,8 @@ describe("acp bridge", () => {
           questions: [
             {
               id: "value",
-              prompt: "Coding-plan reserve reached\n\nSwitch to the fallback plan?",
+              prompt:
+                "Coding-plan reserve reached\n\nSwitch to the fallback plan?",
               multiSelect: false,
               allowFreeText: false,
               options: [
